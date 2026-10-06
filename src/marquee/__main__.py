@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from marquee import db
 from marquee.config import ConfigError, Settings, settings_from_environment
 from marquee.fetch import BASE_QUERY, CAP, PAGE_SIZE, fetch_range, fetch_window
+from marquee.ingest import ingest
 from marquee.tm_client import TicketmasterClient, TicketmasterError
 from marquee.windows import API_TIME_FORMAT, api_time, plan_range, plan_windows
 
@@ -31,6 +32,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--split-threshold", type=_positive, default=CAP, metavar="N",
         help=f"split windows whose page 0 reports more than N events (default {CAP})",
     )
+    commands.add_parser(
+        "ingest", help="fetch every window plus undated events; save raw; load the clean tables"
+    )
     for command in (brute, windowed):
         # Pass the same --start to both, back to back, for a like-for-like comparison.
         command.add_argument(
@@ -49,6 +53,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_migrate(settings)
     if args.command == "brute-force":
         return run_brute_force(settings, args.start)
+    if args.command == "ingest":
+        return run_ingest(settings)
     if args.command == "fetch-windows":
         return run_fetch_windows(settings, args.start, args.split_threshold)
     parser.error(f"unknown command {args.command!r}")
@@ -72,6 +78,33 @@ def run_migrate(settings: Settings) -> int:
 def make_client(settings: Settings) -> TicketmasterClient:
     # A seam for tests, which swap in a client over a fake transport.
     return TicketmasterClient(settings.tm_api_key or "")
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)  # a seam for tests
+
+
+def run_ingest(settings: Settings) -> int:
+    if settings.tm_api_key is None:
+        log.error("config: TM_API_KEY is not set")
+        return 2
+    with db.connect(settings.database_url) as conn, make_client(settings) as client:
+        s = ingest(conn, client, now=utc_now())
+    if s is None:
+        log.info("ingest: another ingest is running (lock 'marquee.ingest' is held); "
+                 "nothing to do")
+        return 0
+    level = {"succeeded": logging.INFO, "partial": logging.WARNING}.get(s.status, logging.ERROR)
+    nulled = ", ".join(f"{k} {v}" for k, v in sorted(s.onsale_nulled.items())) or "none"
+    log.log(
+        level,
+        "ingest: run %d %s: %s windows (%s split), %d calls; reported %s, fetched %s, "
+        "unique %d (%d undated); %d changes; onsale nulled: %s; budget left %s%s",
+        s.run_id, s.status, s.windows, s.splits, s.api_calls, s.reported_total,
+        s.fetched_total, s.unique_events, s.undated_events, s.changes, nulled, s.budget_left,
+        f"; error: {s.error}" if s.error else "",
+    )
+    return 1 if s.status == "failed" else 0
 
 
 def run_brute_force(settings: Settings, start: datetime | None) -> int:

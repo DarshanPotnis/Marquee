@@ -104,8 +104,8 @@ def test_raw_is_kept_exactly_as_received(migrated: Schema) -> None:
 
 
 def test_probe_pages_are_saved_and_counted_apart(migrated: Schema) -> None:
-    api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end))
-    s = run(migrated, api, split_threshold=50)
+    api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end))  # about 23 a week, 3 a day
+    s = run(migrated, api, split_threshold=20)
     assert s is not None and s.probe_calls > 0 and s.probe_events > 0
     assert counts(migrated)["raw_responses"] == s.api_calls == len(api.requests)
     assert (s.unique_events, counts(migrated)["events"]) == (300, 300)
