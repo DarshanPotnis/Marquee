@@ -15,14 +15,14 @@ A live-events trading desk runs on data that has to be complete, on time and tru
 | Saves raw responses before touching them | Every number can be traced back to its source |
 | Rebuilds clean tables from raw with zero API calls | Fixing a parsing bug never costs quota |
 | Writes keyed on the source's ID | Re-running a job never creates duplicates |
-| Splits searches into date windows | The API's 1,000-result cap can't silently drop data |
+| Splits searches into date windows | The API's paging cap can't drop data |
 | Paces requests and retries only safe errors | Stays under rate limits without getting blocked |
 | Logs every run and runs checks afterward | Silent failures become loud |
 | Shows a freshness badge | Nobody has to guess whether the data is current |
 
 ### Non-goals (deliberately out of scope)
 
-- **No resale prices.** Resale marketplaces have no public API. `priceRanges` from Ticketmaster are face-value ranges, present on some events only.
+- **No prices.** Resale marketplaces have no public API. Ticketmaster's face-value `priceRanges` was absent on all 1,200 events fetched in Phase 0, so no prices are stored.
 - **No scraping.** Official API only.
 - **No models, no user accounts, no fancy frontend.**
 - **Not commercial.** Data is cached only as long as the provider's terms allow (see §8).
@@ -43,7 +43,7 @@ A live-events trading desk runs on data that has to be complete, on time and tru
    └──────┬───────┘               │  transform: a pure function, re-runnable
           │                       ▼
           │      venues · attractions · events · event_attractions
-          │      price_range_snapshots (append-only, change-only)
+          │      event_changes (append-only, one row per changed field)
           │                       │
           ▼                       ▼
    ingest_runs ◄──────── checks ──► check_results
@@ -57,7 +57,7 @@ A live-events trading desk runs on data that has to be complete, on time and tru
 1. Take a Postgres advisory lock, so two runs can never overlap. If the lock is held, exit quietly.
 2. Open an `ingest_runs` row with status `running`.
 3. **Plan windows:** split the next 90 days into date windows small enough that each has 1,000 results or fewer (§4).
-4. For each window, fetch every page. **Each page is one transaction:** save raw → transform → upsert. A page either fully lands or not at all, so a crash halfway is always safe to re-run.
+4. For each window, fetch every page. Then make the two undated calls for TBA and TBD events (§4). **Each page is one transaction:** save raw → transform → detect changes against the stored rows → write `event_changes` → upsert. A page either fully lands or not at all, so a crash halfway is always safe to re-run.
 5. Run the checks (§5) and write `check_results`.
 6. Prune raw responses older than the retention window (§8).
 7. Close the run: `succeeded`, `partial` (budget guard stopped it early), or `failed` (with the error).
@@ -111,8 +111,8 @@ CREATE TABLE venues (
   city        text,
   state       text,
   timezone    text,
-  latitude    double precision,
-  longitude   double precision,
+  latitude    double precision,   -- arrives as a JSON string; parsed
+  longitude   double precision,   -- arrives as a JSON string; parsed
   updated_at  timestamptz NOT NULL DEFAULT now(),
   UNIQUE (source, source_id)
 );
@@ -137,10 +137,10 @@ CREATE TABLE events (
   local_date        date,
   local_time        time,               -- null when time is TBA
   starts_at         timestamptz,        -- null when date or time is TBA/TBD
-  status            text,               -- onsale | offsale | canceled | postponed | rescheduled
+  status            text,               -- as the API spells it: onsale | offsale | cancelled | postponed | rescheduled
   segment           text,
   genre             text,
-  public_sale_start timestamptz,
+  public_sale_start timestamptz,        -- null when missing or the 1900-01-01 placeholder
   url               text,
   first_seen_run    bigint REFERENCES ingest_runs,
   last_seen_run     bigint REFERENCES ingest_runs,
@@ -156,17 +156,18 @@ CREATE TABLE event_attractions (
   PRIMARY KEY (event_id, attraction_id)
 );
 
--- Append-only. A row is written only when min or max changed since the last row.
-CREATE TABLE price_range_snapshots (
-  event_id    bigint        NOT NULL REFERENCES events,
-  run_id      bigint        NOT NULL REFERENCES ingest_runs,
-  captured_at timestamptz   NOT NULL,
-  price_type  text          NOT NULL,   -- coalesce missing type to 'unknown'
-  currency    text,
-  min_price   numeric(10,2),
-  max_price   numeric(10,2),
-  PRIMARY KEY (event_id, run_id, price_type)
+-- Append-only. One row per tracked field that differs between a re-fetched event and what we stored.
+CREATE TABLE event_changes (
+  event_id    bigint      NOT NULL REFERENCES events,
+  run_id      bigint      NOT NULL REFERENCES ingest_runs,
+  detected_at timestamptz NOT NULL,
+  field       text        NOT NULL CHECK (field IN
+                ('status', 'local_date', 'local_time', 'venue', 'public_sale_start')),
+  old_value   text,                     -- null when the stored value was null
+  new_value   text,                     -- null when the value went away (e.g. a show became TBA)
+  PRIMARY KEY (event_id, run_id, field)
 );
+CREATE INDEX ON event_changes (detected_at);
 
 CREATE TABLE check_results (
   run_id     bigint  NOT NULL REFERENCES ingest_runs,
@@ -179,31 +180,56 @@ CREATE TABLE check_results (
 );
 ```
 
-`first_seen_run` / `last_seen_run` let you answer "when did this show appear?" and "which shows vanished?" without any extra tables.
+`first_seen_run` / `last_seen_run` let you answer "when did this show appear?" and "which shows vanished?" without any extra tables. A show that goes TBA stays visible through the undated calls (§4), so it isn't mistaken for a vanished one.
+
+**Change detection** is a pure function (`changes.py`). It takes the stored row and the freshly transformed row, and returns one change per tracked field that differs. A first sighting is not a change; new shows come from `first_seen_run`.
+
+**Values as the API sends them (Phase 0, `docs/api-notes.md`):**
+- Status is spelled `cancelled`.
+- Venue `latitude` and `longitude` are strings.
+- `sales.public.startDateTime` uses `1900-01-01T06:00:00Z` or `1900-01-01T18:00:00Z` as a placeholder on about 18% of events.
+- `dates.timezone` is often missing, while the venue's `timezone` never was.
 
 ---
 
-## 4. The 1,000-result cap
+## 4. The paging cap
 
-**The rule (from the docs):** deep paging only reaches the 1,000th item (`size * page < 1000`). A search with 1,400 results quietly returns 1,000, with no error.
+**The rule.**
 
-**Brute force first (ship it, run it, watch it break):** one search for LA music events over the next 90 days, paging until the end. Record `totalElements` against what was received. If LA is big enough, this is the real, observed bug for the README and the interview.
+- **Docs:** deep paging only reaches the 1,000th item (`size * page < 1000`).
+- **Observed in Phase 0:** at the maximum `size=200`, pages 0–5 are served, so **1,200 items are reachable**. Page 6 returns **HTTP 400** (`DIS1035`).
+- So the cap fails loudly, but everything past item 1,200 is out of reach.
+
+**Brute force first (ship it, run it, watch it break):** one search for LA music events over the next 90 days, paging until the end. Record `totalElements` against what was received. Phase 0 already saw it break with the final query: 1,276 reported, 1,200 reachable, 76 lost (`docs/STATUS.md`).
 
 **The fix: adaptive window splitting.** Like splitting a stack of mail until each pile fits in one envelope:
 
 1. Start with weekly windows.
 2. For each window, fetch page 0 and read `page.totalElements`.
-3. If it's over 1,000, split the window in half and repeat. The page-0 probe isn't wasted: its events are saved like any other page.
+3. If it's over 1,000, split the window in half and repeat. The 1,000 threshold is the documented limit, kept as a margin below the observed 1,200. The page-0 probe isn't wasted: its events are saved like any other page.
 4. Stop splitting at a minimum of 1 day. If a single day is still over the cap, record a failed check (`window_over_cap`) instead of silently losing data.
 
 **Boundaries:** windows share edges (one window's end is the next one's start). An event exactly on a boundary may come back twice, which is harmless because upserts dedupe. Gaps would lose data; overlaps can't.
 
+**Undated events.** Events whose date is TBA or TBD never match a date-filtered search. Each run makes two extra undated calls: `includeTBA=only` and `includeTBD=only`. Setting both to `only` in one call returns nothing. Phase 0 found 19 such events, 18 of them postponed.
+
 **Two budgets, both with real numbers from Phase 0:**
 
-1. **API calls.** Calls per run ≈ windows + extra pages. Scheduled runs must stay under about **2,500 calls a day**, half the 5,000 quota, leaving room for manual runs.
-2. **Storage.** The project runs on Neon's free plan, which allows **1 GB per project** and suspends the database (it never charges) if that's exceeded. Raw JSON is the big consumer: raw MB per run × runs per day × retention days must stay under **500 MB**, leaving half for clean tables and headroom.
+1. **API calls.**
+   - Calls per run = windows + extra pages + 2 undated calls. Phase 0 measured **15**: 13 one-page windows plus 2.
+   - Scheduled runs must stay under about **2,500 calls a day**, half the 5,000 quota, leaving room for manual runs. Hourly is 360.
+2. **Storage.**
+   - The project runs on Neon's free plan, which allows **1 GB per project** and suspends the database (it never charges) if that's exceeded.
+   - Raw JSON is the big consumer: raw MB per run × runs per day × retention days must stay under **500 MB**, leaving half for clean tables and headroom.
+   - Phase 0 measured **14.46 MB of JSON text per run**. Hourly with 3-day retention is 1,041 MB of text.
+   - Postgres compresses large values, so Phase 4 measures the real on-disk size per run with `pg_total_relation_size('raw_responses')`.
 
-If either budget doesn't fit hourly runs, lower the frequency (every 2 or 3 hours) or the retention, and record the math in decision record 003. Running out of storage is a silent failure too, so the dashboard shows database size against the 1 GB limit.
+If hourly runs with 3-day retention don't fit on disk, the options in order are:
+
+1. Run every 3 hours.
+2. Store a raw page only when its content hash changed.
+
+Record the math in decision record 003. Running out of storage is a silent failure too, so the dashboard shows database size against the 1 GB limit.
 
 ---
 
@@ -214,10 +240,10 @@ If either budget doesn't fit hourly runs, lower the frequency (every 2 or 3 hour
 | `fetched_vs_reported` | Per window, received equals `totalElements`, within a small tolerance (totals can shift while paging) | Paging bugs, the cap, dropped pages |
 | `volume_vs_baseline` | `unique_events` ≥ 70% of the median of the last 7 successful runs (skipped until 3 runs exist) | A source silently returning less |
 | `window_over_cap` | No window ended over 1,000 after splitting | Data we know we couldn't fetch |
-| `price_sanity` | `0 < min_price ≤ max_price` wherever present | Units or parsing bugs |
 | `events_without_venue` | Count only; a warning, not a failure | Upstream data gaps |
+| `venues_outside_ca` | Count and list venues whose state isn't CA; a warning, not a failure | Out-of-area venues tagged DMA 324 (Phase 0: 2 venues in Canada, 3 events) |
 
-**Freshness** is computed by the dashboard, not stored: age since the last `succeeded` run. Green under 90 minutes, yellow under 3 hours, red beyond that (tuned to an hourly schedule).
+**Freshness** is computed by the dashboard, not stored: the age since the last `succeeded` run, measured against the schedule interval (a setting). Green under 1.5 intervals, yellow under 3 intervals, red beyond that. For an hourly schedule that's 90 minutes and 3 hours.
 
 ---
 
@@ -249,7 +275,8 @@ marquee/
 │   ├── tm_client.py          # HTTP: pacing, retries, budget guard
 │   ├── windows.py            # window planning and splitting (pure)
 │   ├── transform.py          # raw JSON -> rows (pure)
-│   ├── load.py               # upserts, change-only price snapshots
+│   ├── changes.py            # stored row vs new row -> event_changes (pure)
+│   ├── load.py               # upserts, event_changes inserts
 │   ├── ingest.py             # orchestrates one run
 │   ├── checks.py             # check rules (pure where possible)
 │   └── queries.py            # read queries for the dashboard
@@ -293,15 +320,15 @@ Every phase starts with a plain-English plan and ends with its **done check run 
 | 1 | **Skeleton.** `pyproject`, config, `docker-compose`, migration runner, `001_init.sql`, CI. | 1 h | `python -m marquee migrate` runs twice without error; CI is green. |
 | 2 | **HTTP client.** | 1.5 h | Tests pass: 429 then success; 401 fails with no retry; five 500s give up; pacing ≥ 250 ms; budget guard stops cleanly; the key never appears in params, logs or errors. |
 | 3 | **Windows.** Brute force first: a single window, run for real, record what happens. Then adaptive splitting. | 1.5 h | Tests: windows cover the whole range with no gaps; splitting stops at 1 day; an over-cap day is reported. The real-run numbers are written in `STATUS.md`. |
-| 4 | **Raw, transform, load.** | 2 h | Tests: transform handles a missing venue, missing attractions, missing `priceRanges` and a TBA time; loading twice gives identical counts; `rebuild` reproduces identical clean tables (row counts plus a checksum); a price snapshot is written only on change. |
+| 4 | **Raw, transform, change detection, load.** | 2 h | Tests: transform handles a missing venue, missing attractions, a TBA date, a missing time (`noSpecificTime`), lat/long as strings and the 1900 onsale placeholder; loading twice gives identical counts; `rebuild` reproduces identical clean tables (row counts plus a checksum). Change detection, a pure function with tests first, writes one `event_changes` row per changed field (status, local date, local time, venue, public sale start), none when nothing changed, and none on a first sighting. On-disk raw size per run is measured and the schedule is chosen (§4). |
 | 5 | **Checks, run record, prune.** | 1 h | Each check has a passing and a failing test. A real run shows its checks in `check_results`. |
-| 6 | **Dashboard.** | 1.5 h | It shows the freshness badge, the last 24 runs (calls, reported vs fetched, status), the checks panel, an upcoming-events table with filters (date, venue, status), events per week, recent price-range changes, and database size against the 1 GB limit. |
+| 6 | **Dashboard.** | 1.5 h | It shows the freshness badge, the last 24 runs (calls, reported vs fetched, status), the checks panel, an upcoming-events table with filters (date, venue, status), events per week, changes since the last day (new shows via `first_seen_run`; postponed, cancelled and rescheduled shows; date moves), public onsales in the next 7 days (decision pending on the Phase 0 onsale report in `STATUS.md`), and database size against the 1 GB limit. |
 | 7 | **Schedule.** `ingest.yml` runs at minute 17 on the schedule the §4 budgets allow (hourly if both fit), with secrets `TM_API_KEY` and `DATABASE_URL` (Neon). | 45 min | Two scheduled runs have succeeded and appear on the dashboard, and measured calls and storage per run match the budget. |
 | 8 | **Docs and rehearsal.** README, decision records, `STATUS.md`. | 1 h | A fresh clone, following only the README, reaches a working dashboard. The demo is rehearsed twice. |
 
 ### Cut line (if you're behind at hour 6)
 
-Cut in this order: (1) price snapshots, (2) the scheduled workflow (run ingest manually a few times instead), (3) dashboard extras beyond the freshness badge, run history and checks.
+Cut in this order: (1) `event_changes` and the onsale panel, (2) the scheduled workflow (run ingest manually a few times instead), (3) dashboard extras beyond the freshness badge, run history and checks.
 
 **Never cut:** raw-first storage, idempotent upserts, window splitting, checks, rebuild, tests, the README.
 
@@ -313,8 +340,8 @@ One page each: the problem, the options, the choice, why, and what would change 
 
 1. **001: Raw first.** The transform reads only from raw.
 2. **002: Our own IDs plus (source, source_id).** Ready for a second marketplace.
-3. **003: Boring stack.** A scheduler, Postgres and Streamlit, with written upgrade triggers: add an orchestrator when jobs depend on each other, partition by month when price queries pass a few seconds, move to a warehouse when Postgres strains.
-4. **004: Adaptive window splitting** for the 1,000-result cap.
+3. **003: Boring stack.** A scheduler, Postgres and Streamlit, with written upgrade triggers: add an orchestrator when jobs depend on each other, partition by month when `event_changes` or raw queries pass a few seconds, move to a warehouse when Postgres strains.
+4. **004: Adaptive window splitting** for the paging cap.
 
 ---
 
@@ -327,4 +354,6 @@ Write these in `docs/STATUS.md` from real runs, and carry the final values into 
 - Duplicates after re-running the same ingest (target: 0)
 - Time to rebuild every clean table from raw, and the API calls it used (target: 0)
 - Number of scheduled runs, and any check that ever failed and why
+- `event_changes` rows across scheduled runs, by field, and undated (TBA/TBD) events captured per run
+- On-disk raw size per run (`pg_total_relation_size`) and the schedule it allowed
 - Any real surprise in the data (missing fields, odd statuses, TBA times)
