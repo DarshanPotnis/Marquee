@@ -110,6 +110,16 @@ def test_a_good_page_comes_back_with_key_free_params() -> None:
     assert sent.url.params["apikey"] == KEY  # the key does go out, only on the wire
 
 
+def test_the_page_keeps_the_exact_bytes_received() -> None:
+    # Odd key order and whitespace on purpose: raw must be byte-for-byte what arrived.
+    exact = (b'{"page": {"totalPages": 1,  "size": 200, "number": 0, "totalElements": 0},'
+             b'\n "_links":{}}')
+    server = Server(httpx.Response(200, content=exact, headers={"Rate-Limit-Available": "4000"}))
+    page = make_client(server, FakeTime()).search_events(PARAMS)
+    assert page.raw == exact
+    assert page.body["page"]["totalElements"] == 0
+
+
 def test_the_quota_reset_time_is_read() -> None:
     client = make_client(Server(ok()), FakeTime())
     client.search_events(PARAMS)
