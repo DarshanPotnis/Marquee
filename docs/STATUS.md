@@ -4,6 +4,54 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 8, README, decision records, fresh clone, independent review
+
+### Fresh-clone test: following only the README
+
+The repository was cloned from GitHub at commit `48305a7` into a new folder, with its own Docker container.
+
+| README step | Result |
+|---|---|
+| `cp .env.example .env`, then paste the key | The defaults already point at the local container's two databases |
+| `docker compose up -d --wait` | Healthy; the init script created `marquee` |
+| `uv run python -m marquee migrate` | `applied 4 (001 … 004), already applied 0` |
+| `uv run python -m marquee ingest` | Run 1 **succeeded**: 16 calls, 1,290 reported = 1,290 fetched, unique 1,309 (19 undated), 7 checks with 1 warning, **8.8 s** |
+| `uv run streamlit run dashboard/app.py` | Served, showing **Fresh** and "1,290 reported · 1,290 received · 0 missing", with no Deploy button |
+| `uv run pytest`, `ruff check`, `mypy` | **390 passed**; ruff and mypy clean |
+
+**Found by the fresh clone:**
+
+1. **Port 8501 can be taken.** Streamlit moved to 8502 because another dashboard was running. The README now says "or the next free port".
+2. **A clone in a folder Docker Desktop doesn't share gets an empty `docker-entrypoint-initdb.d`,** then "database marquee does not exist". This happened in my sandbox's temporary folder. Under `/Users` it works, and Docker Desktop shares `/Users` by default, so the README doesn't change.
+3. **A container created before `docker/initdb/` existed has no `marquee` database.** The README already says to run `docker compose down -v`.
+
+Afterwards, the clone, its container and its volume were deleted; its `.env` held the real key.
+
+### Independent review
+
+A subagent that hadn't seen the build conversation reviewed the repository: it was read-only, kept away from `.env` and didn't connect to production. It reported 5 findings plus a note. I confirmed each against the code; none is fixed yet. They're listed in the README under "Known issues":
+
+1. A run whose error-level checks failed still counts as `succeeded`, for the volume baseline, freshness, "listed" and prune.
+2. Raw and load share a transaction, so a page the database refuses loses its raw and ends the run.
+3. `rebuild` and `rebuild --verify` don't take the ingest lock.
+4. `rebuild --verify` can't pass once raw has been pruned, because `first_seen_run` can't be reproduced.
+5. The latest succeeded run's raw has no age cap, and pruning stops when runs stop.
+
+Plus: a run killed mid-way can stay `running` for good.
+
+**The README was corrected where it overclaimed:**
+- "0 differences" now says it was measured while all raw was retained.
+- "Never beyond 14 days" now names the two exceptions.
+- "The last 7 good runs" now says "succeeded runs".
+
+### Also
+
+- **Screenshots: synthetic data only.** `scripts/demo_seed.py` runs the real pipeline six times against the test suite's fake API, including one PARTIAL run and a warning. It refuses any database not on this machine; tried with a Neon-style URL, it refused.
+- **The Mermaid diagram was rendered headlessly with mermaid 11:** no errors. It's top-down, because left-to-right was too wide to read on GitHub.
+- **Decision 002 written; decision 003 updated** (16 calls a run since Phase 5, GitHub Actions since Phase 7).
+
+---
+
 ## 2026-10-06: Dashboard fixes: newly listed vs entered the window, plain-English check details
 
 ### What changed
