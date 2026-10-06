@@ -1,0 +1,39 @@
+name: ingest
+
+# Hourly at minute 17: GitHub delays scheduled runs at busy times, which include the start of
+# every hour. A failed run (exit 1: partial, failed, or an error-level check failed) turns red
+# and GitHub emails the user who last changed the cron line (PLAN §5, alert path).
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never two runs at once. A new run waits for the one in progress instead of cancelling it (a
+# half-finished run is safe but wasted calls); GitHub keeps at most one run waiting. The ingest
+# advisory lock is the second guard, for a manual run from a laptop.
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # Actions are pinned to the commit of a specific release, never a floating tag or branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run python -m marquee migrate
+        env:
+          MARQUEE_DATABASE_URL: ${{ secrets.MARQUEE_DATABASE_URL }}
+      - run: uv run python -m marquee ingest
+        env:
+          MARQUEE_DATABASE_URL: ${{ secrets.MARQUEE_DATABASE_URL }}
+          TM_API_KEY: ${{ secrets.TM_API_KEY }}
