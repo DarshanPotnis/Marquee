@@ -4,6 +4,25 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 3 follow-up, splitting proven on the real API
+
+`fetch-windows` gained `--split-threshold N` (default 1,000). It ran once for real at **N = 100**, so that ordinary weeks had to split.
+
+```
+fetch-windows: 2026-10-06T18:12:54Z .. 2027-01-04T08:00:00Z, 13 weekly windows planned, split threshold 100
+fetch-windows: 22 final windows, 9 split (9 probe calls, 1175 probe events)
+fetch-windows: final windows: reported 1282, fetched 1282, unique 1282
+fetch-windows: whole range reported 1282 now; unique == reported: yes
+fetch-windows: 32 calls (31 for windows + 1 whole-range check); over-cap days: none
+```
+
+- **The proof holds with real splitting:** unique IDs (1,282) equal the reported total (1,282).
+- **The probe pages were counted separately.** They returned 1,175 events, all of which reappeared in the child windows. Had they been added to "fetched", the run would have seemed to fetch 2,457 events when only 1,282 exist.
+- **No event fell exactly on one of the 22 local-midnight edges**, so fetched still equalled unique.
+- **Cost:** 32 calls instead of 14. That's why the production threshold stays at 1,000.
+
+---
+
 ## 2026-10-06: Phase 3, windows
 
 ### Before and after: same query, same range, run back to back
