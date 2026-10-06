@@ -86,8 +86,10 @@ def _run(
     conn: Connection, client: TicketmasterClient, now: datetime, split_threshold: int,
     retention_days: int,
 ) -> RunSummary:
-    opened = conn.execute("INSERT INTO ingest_runs (source) VALUES (%s) RETURNING run_id,"
-                          " started_at", (SOURCE,)).fetchone()
+    whole = plan_range(now)
+    opened = conn.execute(
+        "INSERT INTO ingest_runs (source, range_start, range_end) VALUES (%s, %s, %s)"
+        " RETURNING run_id, started_at", (SOURCE, whole.start, whole.end)).fetchone()
     assert opened is not None
     run_id, started_at = opened
     calls_before = client.calls
@@ -109,7 +111,6 @@ def _run(
     total_reported: int | None = None
     status, error = "succeeded", None
     try:
-        whole = plan_range(now)
         result = fetch_range(client, BASE_QUERY, plan_windows(now),
                              split_threshold=split_threshold, on_page=on_page)
         # The API's total for the whole range, read right after the windows, for unique_vs_total.
