@@ -119,9 +119,17 @@ class RangeResult:
 
 
 def fetch_range(
-    client: TicketmasterClient, base: Mapping[str, str], windows: Sequence[Window]
+    client: TicketmasterClient,
+    base: Mapping[str, str],
+    windows: Sequence[Window],
+    *,
+    split_threshold: int = CAP,
 ) -> RangeResult:
-    """Fetch every window, halving any whose page 0 reports more than CAP (down to one day)."""
+    """Fetch every window, halving any whose page 0 reports more than `split_threshold`.
+
+    Splitting stops at one local day. `over_cap` stays tied to CAP, the API's paging limit,
+    because that is the risk of losing data; a lower threshold only forces more splitting.
+    """
     start_calls = client.calls
     final: list[WindowResult] = []
     probes: list[WindowResult] = []
@@ -130,7 +138,8 @@ def fetch_range(
         window = todo.popleft()
         before = client.calls
         page_0 = client.search_events(_params(base, window, 0))
-        halves = split(window) if int(page_0.body["page"]["totalElements"]) > CAP else None
+        reported = int(page_0.body["page"]["totalElements"])
+        halves = split(window) if reported > split_threshold else None
         if halves is None:
             final.append(fetch_window(client, base, window, first_page=page_0, calls_before=before))
         else:

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 from marquee import db
 from marquee.config import ConfigError, Settings, settings_from_environment
-from marquee.fetch import BASE_QUERY, PAGE_SIZE, fetch_range, fetch_window
+from marquee.fetch import BASE_QUERY, CAP, PAGE_SIZE, fetch_range, fetch_window
 from marquee.tm_client import TicketmasterClient, TicketmasterError
 from marquee.windows import API_TIME_FORMAT, api_time, plan_range, plan_windows
 
@@ -26,6 +26,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     windowed = commands.add_parser(
         "fetch-windows", help="read-only: the same range in LA-day windows, split as needed"
+    )
+    windowed.add_argument(
+        "--split-threshold", type=_positive, default=CAP, metavar="N",
+        help=f"split windows whose page 0 reports more than N events (default {CAP})",
     )
     for command in (brute, windowed):
         # Pass the same --start to both, back to back, for a like-for-like comparison.
@@ -46,7 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "brute-force":
         return run_brute_force(settings, args.start)
     if args.command == "fetch-windows":
-        return run_fetch_windows(settings, args.start)
+        return run_fetch_windows(settings, args.start, args.split_threshold)
     parser.error(f"unknown command {args.command!r}")
 
 
@@ -95,7 +99,9 @@ def run_brute_force(settings: Settings, start: datetime | None) -> int:
     return 0
 
 
-def run_fetch_windows(settings: Settings, start: datetime | None) -> int:
+def run_fetch_windows(
+    settings: Settings, start: datetime | None, split_threshold: int = CAP
+) -> int:
     """The "after" picture. Proof: unique event ids across all windows equal the API's total."""
     if settings.tm_api_key is None:
         log.error("config: TM_API_KEY is not set")
@@ -104,7 +110,7 @@ def run_fetch_windows(settings: Settings, start: datetime | None) -> int:
     windows = plan_windows(whole.start)
     try:
         with make_client(settings) as client:
-            result = fetch_range(client, BASE_QUERY, windows)
+            result = fetch_range(client, BASE_QUERY, windows, split_threshold=split_threshold)
             # The reported total for the whole range at this moment: totals drift by the hour.
             check = client.search_events({**BASE_QUERY, "startDateTime": api_time(whole.start),
                                           "endDateTime": api_time(whole.end), "size": "1"})
@@ -120,8 +126,9 @@ def run_fetch_windows(settings: Settings, start: datetime | None) -> int:
         for w in result.over_cap
     ) or "none"
     log.info(
-        "fetch-windows: %s .. %s (Ticketmaster LA market, Music), %d weekly windows planned",
-        api_time(whole.start), api_time(whole.end), len(windows),
+        "fetch-windows: %s .. %s (Ticketmaster LA market, Music), %d weekly windows planned, "
+        "split threshold %d",
+        api_time(whole.start), api_time(whole.end), len(windows), split_threshold,
     )
     log.info(
         "fetch-windows: %d final windows, %d split (%d probe calls, %d probe events)",
@@ -141,6 +148,16 @@ def run_fetch_windows(settings: Settings, start: datetime | None) -> int:
         result.calls + 1, result.calls, over_cap,
     )
     return 0 if proven else 1
+
+
+def _positive(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive whole number, got {text!r}")
+    return value
 
 
 def _utc(text: str) -> datetime:
