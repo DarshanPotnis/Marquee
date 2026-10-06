@@ -27,9 +27,10 @@ class FakeEvent:
 
 
 def spread(n: int, start: datetime, end: datetime, prefix: str = "evt") -> list[FakeEvent]:
-    """n events evenly spaced strictly inside (start, end), so none sits on an edge."""
+    """n events evenly spaced inside (start, end), at whole seconds like real dateTimes."""
     step = (end - start) / (n + 1)
-    return [FakeEvent(f"{prefix}{i:05d}", start + step * (i + 1)) for i in range(n)]
+    return [FakeEvent(f"{prefix}{i:05d}", (start + step * (i + 1)).replace(microsecond=0))
+            for i in range(n)]
 
 
 class FakeDiscovery:
