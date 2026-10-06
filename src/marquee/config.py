@@ -6,6 +6,7 @@ import os
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
@@ -30,9 +31,10 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     database_url = _text(env, "MARQUEE_DATABASE_URL")
     if database_url is None:
         raise ConfigError("MARQUEE_DATABASE_URL is not set")
-    if not database_url.startswith(("postgresql://", "postgres://")):
-        # Never echo the value: it may hold a password.
-        raise ConfigError("MARQUEE_DATABASE_URL must be a postgresql:// or postgres:// URL")
+    _check_database_url("MARQUEE_DATABASE_URL", database_url)
+    test_url = _text(env, "MARQUEE_TEST_DATABASE_URL")
+    if test_url is not None and _same_database(test_url, database_url):
+        raise ConfigError(_TEST_IS_PRODUCTION)
     return Settings(
         database_url=database_url,
         tm_api_key=_text(env, "TM_API_KEY"),
@@ -45,8 +47,30 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     )
 
 
+def load_test_database_url(env: Mapping[str, str]) -> str | None:
+    """The integration-test database URL, or None if unset. Never production, never pooled."""
+    url = _text(env, "MARQUEE_TEST_DATABASE_URL")
+    if url is None:
+        return None
+    _check_database_url("MARQUEE_TEST_DATABASE_URL", url)
+    production = _text(env, "MARQUEE_DATABASE_URL")
+    if production is not None and _same_database(url, production):
+        raise ConfigError(_TEST_IS_PRODUCTION)
+    return url
+
+
+_TEST_IS_PRODUCTION = (
+    "MARQUEE_TEST_DATABASE_URL points at the same database as MARQUEE_DATABASE_URL; tests create "
+    "and drop schemas and take the migrate lock, so use a separate database (a Neon dev branch "
+    "or the local container)"
+)
+
 SETTING_NAMES = (
-    "MARQUEE_DATABASE_URL", "TM_API_KEY", "RAW_RETENTION_DAYS", "SCHEDULE_INTERVAL_MINUTES"
+    "MARQUEE_DATABASE_URL",
+    "MARQUEE_TEST_DATABASE_URL",  # read only to refuse a test URL that is production
+    "TM_API_KEY",
+    "RAW_RETENTION_DAYS",
+    "SCHEDULE_INTERVAL_MINUTES",
 )
 
 
@@ -78,6 +102,30 @@ def read_environment(
             "unset one so it's clear which applies"
         )
     return from_file | from_env
+
+
+def _check_database_url(name: str, url: str) -> None:
+    # Messages never echo the URL: it may hold a password.
+    if not url.startswith(("postgresql://", "postgres://")):
+        raise ConfigError(f"{name} must be a postgresql:// or postgres:// URL")
+    if "-pooler" in urlsplit(url).netloc.rpartition("@")[2].lower():
+        # Advisory locks belong to one server session. A pooler can hand that session to another
+        # client mid-run, so the lock would no longer keep two runs apart.
+        raise ConfigError(
+            f"{name} uses a pooled endpoint (-pooler in the host); advisory locks need a direct "
+            "connection, so use the host without -pooler"
+        )
+
+
+def _same_database(a: str, b: str) -> bool:
+    """Same host, port and database name, however the rest of the URL is written."""
+    try:
+        pa, pb = urlsplit(a), urlsplit(b)
+        ident_a = ((pa.hostname or "").lower(), pa.port or 5432, pa.path.lstrip("/"))
+        ident_b = ((pb.hostname or "").lower(), pb.port or 5432, pb.path.lstrip("/"))
+    except ValueError:  # unparseable port or host: fall back to comparing the text
+        return a == b
+    return ident_a == ident_b
 
 
 def _text(env: Mapping[str, str], name: str) -> str | None:
