@@ -5,12 +5,13 @@ All API traffic goes through TicketmasterClient. Window arithmetic lives in wind
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections import deque
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from marquee.tm_client import ApiError, Page, TicketmasterClient
-from marquee.windows import Window, api_time
+from marquee.windows import Window, api_time, split
 
 # The final query (api-notes §2-§4): the Ticketmaster LA market (DMA 324), Music segment.
 BASE_QUERY: Mapping[str, str] = {"dmaId": "324", "segmentId": "KZFzniwnSyZfZ7v7nJ"}
@@ -72,6 +73,70 @@ def fetch_window(
             stopped_by = f"{exc.code} at page {number}"
             break
     return WindowResult(window, tuple(pages), client.calls - start_calls, stopped_by)
+
+
+@dataclass(frozen=True)
+class RangeResult:
+    """A windowed fetch. The run's numbers come from the final windows only.
+
+    A window that turned out to be over the cap was split; its page 0 (the probe) is kept, because
+    its events are real and get saved, but they reappear in the child windows. Counting probes
+    apart keeps "reported vs fetched" like with like, and stops the duplicates from looking as if
+    we fetched more events than exist.
+    """
+
+    final: tuple[WindowResult, ...]  # in date order; together they cover the range
+    probes: tuple[WindowResult, ...]  # page 0 of each window that was split
+    calls: int  # every API call, probes and retries included
+
+    @property
+    def reported(self) -> int:
+        return sum(w.reported for w in self.final)
+
+    @property
+    def fetched(self) -> int:  # events received in final windows, edge overlaps included
+        return sum(w.fetched for w in self.final)
+
+    @property
+    def unique_ids(self) -> set[str]:
+        return {i for w in self.final for i in w.event_ids}
+
+    @property
+    def splits(self) -> int:
+        return len(self.probes)
+
+    @property
+    def probe_calls(self) -> int:
+        return sum(p.calls for p in self.probes)
+
+    @property
+    def probe_events(self) -> int:
+        return sum(p.fetched for p in self.probes)
+
+    @property
+    def over_cap(self) -> list[WindowResult]:
+        return [w for w in self.final if w.over_cap]
+
+
+def fetch_range(
+    client: TicketmasterClient, base: Mapping[str, str], windows: Sequence[Window]
+) -> RangeResult:
+    """Fetch every window, halving any whose page 0 reports more than CAP (down to one day)."""
+    start_calls = client.calls
+    final: list[WindowResult] = []
+    probes: list[WindowResult] = []
+    todo = deque(windows)
+    while todo:
+        window = todo.popleft()
+        before = client.calls
+        page_0 = client.search_events(_params(base, window, 0))
+        halves = split(window) if int(page_0.body["page"]["totalElements"]) > CAP else None
+        if halves is None:
+            final.append(fetch_window(client, base, window, first_page=page_0, calls_before=before))
+        else:
+            probes.append(WindowResult(window, (page_0,), client.calls - before, None))
+            todo.extendleft(reversed(halves))  # keep date order
+    return RangeResult(tuple(final), tuple(probes), client.calls - start_calls)
 
 
 def events(page: Page) -> list[dict[str, Any]]:
