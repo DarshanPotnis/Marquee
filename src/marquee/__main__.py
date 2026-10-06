@@ -10,9 +10,9 @@ from datetime import UTC, datetime
 
 from marquee import db
 from marquee.config import ConfigError, Settings, settings_from_environment
-from marquee.fetch import BASE_QUERY, PAGE_SIZE, fetch_window
+from marquee.fetch import BASE_QUERY, PAGE_SIZE, fetch_range, fetch_window
 from marquee.tm_client import TicketmasterClient, TicketmasterError
-from marquee.windows import API_TIME_FORMAT, api_time, plan_range
+from marquee.windows import API_TIME_FORMAT, api_time, plan_range, plan_windows
 
 log = logging.getLogger("marquee")
 
@@ -24,9 +24,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     brute = commands.add_parser(
         "brute-force", help="read-only: one search over the whole 90-day range, paged to the end"
     )
-    brute.add_argument(
-        "--start", type=_utc, help="range start, YYYY-MM-DDTHH:MM:SSZ (default: now)"
+    windowed = commands.add_parser(
+        "fetch-windows", help="read-only: the same range in LA-day windows, split as needed"
     )
+    for command in (brute, windowed):
+        # Pass the same --start to both, back to back, for a like-for-like comparison.
+        command.add_argument(
+            "--start", type=_utc, help="range start, YYYY-MM-DDTHH:MM:SSZ (default: now)"
+        )
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -40,6 +45,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_migrate(settings)
     if args.command == "brute-force":
         return run_brute_force(settings, args.start)
+    if args.command == "fetch-windows":
+        return run_fetch_windows(settings, args.start)
     parser.error(f"unknown command {args.command!r}")
 
 
@@ -86,6 +93,54 @@ def run_brute_force(settings: Settings, start: datetime | None) -> int:
         result.reported, result.fetched, unique, result.reported - unique, stop, result.calls,
     )
     return 0
+
+
+def run_fetch_windows(settings: Settings, start: datetime | None) -> int:
+    """The "after" picture. Proof: unique event ids across all windows equal the API's total."""
+    if settings.tm_api_key is None:
+        log.error("config: TM_API_KEY is not set")
+        return 2
+    whole = plan_range(start or datetime.now(UTC))
+    windows = plan_windows(whole.start)
+    try:
+        with make_client(settings) as client:
+            result = fetch_range(client, BASE_QUERY, windows)
+            # The reported total for the whole range at this moment: totals drift by the hour.
+            check = client.search_events({**BASE_QUERY, "startDateTime": api_time(whole.start),
+                                          "endDateTime": api_time(whole.end), "size": "1"})
+    except TicketmasterError as exc:
+        log.error("fetch-windows: %s", exc)
+        return 1
+    reported_now = int(check.body["page"]["totalElements"])
+    unique = len(result.unique_ids)
+    proven = unique == reported_now
+    over_cap = ", ".join(
+        f"{w.window.first_day} ({w.reported} reported"
+        + (f", stopped by {w.stopped_by})" if w.stopped_by else ")")
+        for w in result.over_cap
+    ) or "none"
+    log.info(
+        "fetch-windows: %s .. %s (Ticketmaster LA market, Music), %d weekly windows planned",
+        api_time(whole.start), api_time(whole.end), len(windows),
+    )
+    log.info(
+        "fetch-windows: %d final windows, %d split (%d probe calls, %d probe events)",
+        len(result.final), result.splits, result.probe_calls, result.probe_events,
+    )
+    log.info(
+        "fetch-windows: final windows: reported %d, fetched %d, unique %d",
+        result.reported, result.fetched, unique,
+    )
+    log.log(
+        logging.INFO if proven else logging.ERROR,
+        "fetch-windows: whole range reported %d now; unique == reported: %s",
+        reported_now, "yes" if proven else f"NO ({unique} of {reported_now})",
+    )
+    log.info(
+        "fetch-windows: %d calls (%d for windows + 1 whole-range check); over-cap days: %s",
+        result.calls + 1, result.calls, over_cap,
+    )
+    return 0 if proven else 1
 
 
 def _utc(text: str) -> datetime:
