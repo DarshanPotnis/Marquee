@@ -12,6 +12,7 @@ from marquee import db
 from marquee.config import ConfigError, Settings, settings_from_environment
 from marquee.fetch import BASE_QUERY, CAP, PAGE_SIZE, fetch_range, fetch_window
 from marquee.ingest import ingest
+from marquee.prune import prune
 from marquee.rebuild import RebuildError, rebuild, verify
 from marquee.tm_client import TicketmasterClient, TicketmasterError
 from marquee.windows import API_TIME_FORMAT, api_time, plan_range, plan_windows
@@ -36,6 +37,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.add_parser(
         "ingest", help="fetch every window plus undated events; save raw; load the clean tables"
     )
+    checks_cmd = commands.add_parser(
+        "checks", help="report a run's check results (default: the latest)"
+    )
+    checks_cmd.add_argument("--run", type=_positive, metavar="N", help="run id")
+    prune_cmd = commands.add_parser(
+        "prune", help="delete raw responses older than RAW_RETENTION_DAYS, by whole run"
+    )
+    prune_cmd.add_argument("--dry-run", action="store_true", help="report only; delete nothing")
     rebuild_cmd = commands.add_parser(
         "rebuild", help="replay retained raw onto the clean tables; 0 API calls"
     )
@@ -63,6 +72,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_brute_force(settings, args.start)
     if args.command == "ingest":
         return run_ingest(settings)
+    if args.command == "checks":
+        return run_checks_report(settings, args.run)
+    if args.command == "prune":
+        return run_prune(settings, dry_run=args.dry_run)
     if args.command == "rebuild":
         return run_rebuild(settings, verify_only=args.verify)
     if args.command == "fetch-windows":
@@ -95,26 +108,70 @@ def utc_now() -> datetime:
 
 
 def run_ingest(settings: Settings) -> int:
+    """Exit 1 for any bad run (partial, failed, or an error-level check failed), so a scheduled
+    run turns red and GitHub notifies its owner (PLAN §5, alert path)."""
     if settings.tm_api_key is None:
         log.error("config: TM_API_KEY is not set")
         return 2
     with db.connect(settings.database_url) as conn, make_client(settings) as client:
-        s = ingest(conn, client, now=utc_now())
+        s = ingest(conn, client, now=utc_now(), retention_days=settings.raw_retention_days)
     if s is None:
         log.info("ingest: another ingest is running (lock 'marquee.ingest' is held); "
                  "nothing to do")
         return 0
-    level = {"succeeded": logging.INFO, "partial": logging.WARNING}.get(s.status, logging.ERROR)
+    bad = s.status != "succeeded" or s.checks_failed > 0
+    level = logging.ERROR if bad else logging.INFO
     nulled = ", ".join(f"{k} {v}" for k, v in sorted(s.onsale_nulled.items())) or "none"
+    checks = (f"{len(s.checks)} run, {s.checks_failed} failed, {s.warnings} warnings"
+              if s.checks else f"skipped (run {s.status})")
     log.log(
         level,
         "ingest: run %d %s: %s windows (%s split), %d calls; reported %s, fetched %s, "
-        "unique %d (%d undated); %d changes; onsale nulled: %s; budget left %s%s",
+        "unique %d (%d undated); %d changes; checks: %s; pruned %d raw; onsale nulled: %s; "
+        "budget left %s%s",
         s.run_id, s.status, s.windows, s.splits, s.api_calls, s.reported_total,
-        s.fetched_total, s.unique_events, s.undated_events, s.changes, nulled, s.budget_left,
-        f"; error: {s.error}" if s.error else "",
+        s.fetched_total, s.unique_events, s.undated_events, s.changes, checks, s.pruned_raw,
+        nulled, s.budget_left, f"; error: {s.error}" if s.error else "",
     )
-    return 1 if s.status == "failed" else 0
+    for c in s.checks:
+        if not c.passed:
+            log.log(logging.ERROR if c.severity == "error" else logging.WARNING,
+                    "ingest: check %s failed (%s): %s", c.name, c.severity, c.detail)
+    return 1 if bad else 0
+
+
+def run_checks_report(settings: Settings, run_id: int | None) -> int:
+    with db.connect(settings.database_url) as conn:
+        if run_id is None:
+            row = conn.execute("SELECT max(run_id) FROM check_results").fetchone()
+            run_id = row[0] if row else None
+        rows = conn.execute(
+            "SELECT check_name, passed, severity, detail FROM check_results WHERE run_id = %s"
+            " ORDER BY severity, check_name", (run_id,)).fetchall() if run_id else []
+    if not rows:
+        log.error("checks: no check results%s", f" for run {run_id}" if run_id else "")
+        return 2
+    failed = sum(1 for _, ok, sev, _ in rows if not ok and sev == "error")
+    warnings = sum(1 for _, ok, sev, _ in rows if not ok and sev == "warning")
+    log.info("checks: run %d: %d checks, %d failed, %d warnings", run_id, len(rows), failed,
+             warnings)
+    for name, ok, severity, detail in rows:
+        log.log(logging.INFO if ok else (logging.ERROR if severity == "error" else logging.WARNING),
+                "checks: %s: %s (%s): %s", name, "passed" if ok else "FAILED", severity, detail)
+    return 0
+
+
+def run_prune(settings: Settings, *, dry_run: bool) -> int:
+    with db.connect(settings.database_url) as conn:
+        r = prune(conn, retention_days=settings.raw_retention_days, dry_run=dry_run)
+    verb = "would delete" if dry_run else "deleted"
+    log.info(
+        "prune: cutoff %s (%d days); %s %d raw responses from %d run%s (%.1f KB stored); "
+        "always keeping run %s (latest succeeded)",
+        r.cutoff.isoformat(timespec="seconds"), settings.raw_retention_days, verb, r.raw_rows,
+        len(r.runs), "" if len(r.runs) == 1 else "s", r.raw_bytes / 1024, r.kept_run,
+    )
+    return 0
 
 
 def run_rebuild(settings: Settings, *, verify_only: bool) -> int:

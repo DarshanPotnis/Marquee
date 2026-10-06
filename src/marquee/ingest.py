@@ -1,4 +1,5 @@
-"""One ingest run (PLAN §2): lock, open the run, fetch, save and load page by page, close the run.
+"""One ingest run (PLAN §2): lock, open the run, fetch, save and load page by page, check, prune,
+close the run.
 
 Each page is one transaction: save raw, transform, detect changes, upsert. A page either fully
 lands or not at all, so a run that stops halfway is always safe to re-run.
@@ -14,12 +15,14 @@ from datetime import datetime
 import psycopg
 from psycopg.types.json import Jsonb
 
+from marquee.checks import BASELINE_RUNS, CheckResult, RunFacts, WindowFacts, run_checks
 from marquee.db import INGEST_LOCK, Connection, LockHeld, advisory_lock
-from marquee.fetch import BASE_QUERY, CAP, RangeResult, WindowResult, fetch_range, fetch_window
+from marquee.fetch import BASE_QUERY, CAP, RangeResult, fetch_range, fetch_window
 from marquee.load import SOURCE, load_rows, save_raw
+from marquee.prune import prune
 from marquee.tm_client import BudgetExhausted, Page, TicketmasterClient, TicketmasterError
 from marquee.transform import transform_page
-from marquee.windows import Window, plan_windows
+from marquee.windows import Window, api_time, plan_range, plan_windows
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +47,16 @@ class RunSummary:
     budget_left: int | None
     changes: int
     error: str | None
+    checks: tuple[CheckResult, ...] = ()  # empty when the run didn't complete
+    pruned_raw: int = 0
+
+    @property
+    def checks_failed(self) -> int:
+        return sum(1 for c in self.checks if c.severity == "error" and not c.passed)
+
+    @property
+    def warnings(self) -> int:
+        return sum(1 for c in self.checks if c.severity == "warning" and not c.passed)
 
 
 @dataclass
@@ -54,18 +67,24 @@ class _Tally:
 
 
 def ingest(
-    conn: Connection, client: TicketmasterClient, *, now: datetime, split_threshold: int = CAP
+    conn: Connection,
+    client: TicketmasterClient,
+    *,
+    now: datetime,
+    split_threshold: int = CAP,
+    retention_days: int = 3,
 ) -> RunSummary | None:
     """Run once. Returns None, having done nothing, if another ingest holds the lock."""
     try:
         with advisory_lock(conn, INGEST_LOCK):
-            return _run(conn, client, now, split_threshold)
+            return _run(conn, client, now, split_threshold, retention_days)
     except LockHeld:
         return None
 
 
 def _run(
-    conn: Connection, client: TicketmasterClient, now: datetime, split_threshold: int
+    conn: Connection, client: TicketmasterClient, now: datetime, split_threshold: int,
+    retention_days: int,
 ) -> RunSummary:
     opened = conn.execute("INSERT INTO ingest_runs (source) VALUES (%s) RETURNING run_id,"
                           " started_at", (SOURCE,)).fetchone()
@@ -87,14 +106,19 @@ def _run(
         tally.onsale_nulled.update(rows.onsale_nulled)
 
     result: RangeResult | None = None
-    undated: list[WindowResult] = []
+    total_reported: int | None = None
     status, error = "succeeded", None
     try:
+        whole = plan_range(now)
         result = fetch_range(client, BASE_QUERY, plan_windows(now),
                              split_threshold=split_threshold, on_page=on_page)
+        # The API's total for the whole range, read right after the windows, for unique_vs_total.
+        # A count, not data: not saved as raw.
+        total = client.search_events({**BASE_QUERY, "startDateTime": api_time(whole.start),
+                                      "endDateTime": api_time(whole.end), "size": "1"})
+        total_reported = int(total.body["page"]["totalElements"])
         for flag in UNDATED_FLAGS:
-            undated.append(fetch_window(client, {**BASE_QUERY, flag: "only"}, None,
-                                        on_page=on_page))
+            fetch_window(client, {**BASE_QUERY, flag: "only"}, None, on_page=on_page)
     except BudgetExhausted as exc:
         status, error = "partial", str(exc)
     except (TicketmasterError, psycopg.Error) as exc:
@@ -102,15 +126,60 @@ def _run(
     except BaseException as exc:
         # A bug, not an outage: close the run as failed, then let it surface with its traceback.
         _close(conn, run_id, "failed", f"{type(exc).__name__}: {exc}", result, tally,
-               client.calls - calls_before, client.budget_left)
+               client.calls - calls_before, client.budget_left, (), 0)
         raise
+    # Checks judge a complete run; a partial or failed run is already a bad run on its own.
+    checks: tuple[CheckResult, ...] = ()
+    if status == "succeeded" and result is not None:
+        checks = tuple(run_checks(_facts(conn, run_id, result, total_reported, tally)))
+        _save_checks(conn, run_id, checks)
+    pruned = prune(conn, retention_days=retention_days)
     return _close(conn, run_id, status, error, result, tally, client.calls - calls_before,
-                  client.budget_left)
+                  client.budget_left, checks, pruned.raw_rows)
+
+
+def _facts(
+    conn: Connection, run_id: int, result: RangeResult, total_reported: int | None, tally: _Tally
+) -> RunFacts:
+    prior = conn.execute(
+        "SELECT unique_events FROM ingest_runs WHERE status = 'succeeded' AND run_id < %s"
+        " AND unique_events IS NOT NULL ORDER BY run_id DESC LIMIT %s", (run_id, BASELINE_RUNS),
+    ).fetchall()
+    no_venue = conn.execute(
+        "SELECT count(*) FROM events WHERE last_seen_run = %s AND venue_id IS NULL", (run_id,),
+    ).fetchone()
+    outside = conn.execute(
+        """SELECT DISTINCT v.name, v.city, v.state FROM events e JOIN venues v USING (venue_id)
+           WHERE e.last_seen_run = %s AND v.state IS DISTINCT FROM 'CA' ORDER BY 1""", (run_id,),
+    ).fetchall()
+    return RunFacts(
+        windows=tuple(WindowFacts(w.window.first_day.isoformat() if w.window else "undated",
+                                  w.reported, w.fetched) for w in result.final),
+        unique_window_ids=len(result.unique_ids),
+        total_reported=total_reported,
+        unique_events=len(tally.ids),
+        prior_unique=tuple(int(r[0]) for r in prior),
+        events_without_venue=int(no_venue[0]) if no_venue else 0,
+        venues_outside_ca=tuple(f"{name} ({city}, {state})" for name, city, state in outside),
+        onsale_nulled=dict(tally.onsale_nulled),
+    )
+
+
+def _save_checks(conn: Connection, run_id: int, checks: tuple[CheckResult, ...]) -> None:
+    with conn.transaction():
+        conn.cursor().executemany(
+            """INSERT INTO check_results
+                 (run_id, check_name, passed, observed, expected, detail, severity)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            [(run_id, c.name, c.passed, c.observed, c.expected, c.detail, c.severity)
+             for c in checks],
+        )
 
 
 def _close(
     conn: Connection, run_id: int, status: str, error: str | None, result: RangeResult | None,
-    tally: _Tally, api_calls: int, budget_left: int | None,
+    tally: _Tally, api_calls: int, budget_left: int | None, checks: tuple[CheckResult, ...],
+    pruned_raw: int,
 ) -> RunSummary:
     summary = RunSummary(
         run_id=run_id, status=status,
@@ -127,17 +196,20 @@ def _close(
         budget_left=budget_left,
         changes=_count_changes(conn, run_id),
         error=error,
+        checks=checks,
+        pruned_raw=pruned_raw,
     )
     conn.execute(
         """UPDATE ingest_runs SET finished_at = now(), status = %s, windows = %s, api_calls = %s,
              reported_total = %s, fetched_total = %s, unique_events = %s, budget_left = %s,
              error = %s, probe_calls = %s, probe_events = %s, undated_events = %s,
-             onsale_nulled = %s
+             onsale_nulled = %s, checks_failed = %s, pruned_raw = %s
            WHERE run_id = %s""",
         (summary.status, summary.windows, summary.api_calls, summary.reported_total,
          summary.fetched_total, summary.unique_events, summary.budget_left, summary.error,
          summary.probe_calls, summary.probe_events, summary.undated_events,
-         Jsonb(summary.onsale_nulled), run_id),
+         Jsonb(summary.onsale_nulled), summary.checks_failed if checks else None,
+         summary.pruned_raw, run_id),
     )
     return summary
 
