@@ -6,7 +6,7 @@ Uses MARQUEE_TEST_DATABASE_URL and skips cleanly without it.
 import gzip
 import hashlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import httpx
 import pytest
@@ -15,6 +15,7 @@ from fake_discovery import FakeDiscovery, FakeEvent, client_for, page_of, spread
 
 import marquee.__main__ as cli
 from marquee import db
+from marquee.checks import CHECKS
 from marquee.config import load_settings
 from marquee.db import INGEST_LOCK, migrate
 from marquee.db import connect as direct_connect
@@ -22,7 +23,7 @@ from marquee.ingest import RunSummary, ingest
 from marquee.load import load_rows
 from marquee.tm_client import QUOTA_VIOLATION
 from marquee.transform import transform_page
-from marquee.windows import plan_range
+from marquee.windows import api_time, local_midnight, plan_range
 
 NOW = datetime(2026, 10, 6, 15, 22, 49, tzinfo=UTC)
 WHOLE = plan_range(NOW)
@@ -58,17 +59,18 @@ def test_a_first_ingest_loads_the_windows_and_the_undated_events(migrated: Schem
     api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end) + undated(3))
     s = run(migrated, api)
     assert s is not None and s.status == "succeeded"
-    assert (s.windows, s.api_calls, s.reported_total, s.fetched_total) == (13, 15, 300, 300)
+    # 13 windows + 1 whole-range total (a count, not data: not saved) + 2 undated calls.
+    assert (s.windows, s.api_calls, s.reported_total, s.fetched_total) == (13, 16, 300, 300)
     assert (s.unique_events, s.undated_events, s.probe_calls, s.probe_events) == (303, 3, 0, 0)
     assert (s.changes, s.onsale_nulled) == (0, {})
     c = counts(migrated)
     assert (c["events"], c["venues"], c["attractions"], c["event_attractions"]) == \
         (303, 1, 303, 303)
-    assert c["raw_responses"] == 15 == len(api.requests)
+    assert c["raw_responses"] == 15 == len(api.requests) - 1
     assert c["event_changes"] == 0
     assert query(migrated, "SELECT status, finished_at IS NOT NULL, api_calls, undated_events,"
                            " onsale_nulled FROM ingest_runs") == \
-        [("succeeded", True, 15, 3, {})]
+        [("succeeded", True, 16, 3, {})]
     assert query(migrated, "SELECT count(*) FROM events WHERE local_date IS NULL"
                            " AND status = 'postponed'") == [(3,)]
 
@@ -107,7 +109,7 @@ def test_probe_pages_are_saved_and_counted_apart(migrated: Schema) -> None:
     api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end))  # about 23 a week, 3 a day
     s = run(migrated, api, split_threshold=20)
     assert s is not None and s.probe_calls > 0 and s.probe_events > 0
-    assert counts(migrated)["raw_responses"] == s.api_calls == len(api.requests)
+    assert counts(migrated)["raw_responses"] == s.api_calls - 1 == len(api.requests) - 1
     assert (s.unique_events, counts(migrated)["events"]) == (300, 300)
 
 
@@ -236,8 +238,9 @@ def test_the_ingest_command_logs_one_summary_line(
     use(monkeypatch, migrated, FakeDiscovery(spread(300, WHOLE.start, WHOLE.end) + undated(3)))
     with caplog.at_level(logging.INFO):
         assert cli.main(["ingest"]) == 0
-    assert ("succeeded: 13 windows (0 split), 15 calls; reported 300, fetched 300, unique 303 "
+    assert ("succeeded: 13 windows (0 split), 16 calls; reported 300, fetched 300, unique 303 "
             "(3 undated); 0 changes") in caplog.text
+    assert "checks: 7 run, 0 failed, 0 warnings; pruned 0 raw" in caplog.text
 
 
 def test_the_ingest_command_exits_quietly_when_another_run_holds_the_lock(
@@ -248,3 +251,118 @@ def test_the_ingest_command_exits_quietly_when_another_run_holds_the_lock(
         holder.execute("SELECT pg_advisory_lock(%s)", (INGEST_LOCK.key,))
         assert cli.main(["ingest"]) == 0
     assert "another ingest is running" in caplog.text
+
+
+# --- Checks (PLAN §5) ----------------------------------------------------------------------------
+
+def check_rows(schema: Schema, run_id: int) -> dict[str, tuple[object, ...]]:
+    rows = query(schema, "SELECT check_name, passed, severity, observed, expected"
+                         " FROM check_results WHERE run_id = %s", run_id)
+    return {r[0]: r[1:] for r in rows}  # type: ignore[misc]
+
+
+def test_a_run_writes_every_check_with_its_severity(migrated: Schema) -> None:
+    api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end) + undated(3))
+    s = run(migrated, api)
+    assert s is not None and s.checks_failed == 0 and s.warnings == 0
+    rows = check_rows(migrated, s.run_id)
+    assert [(n, rows[n][1]) for n, _ in CHECKS] == list(CHECKS)
+    assert all(passed for passed, *_ in rows.values())
+    assert rows["unique_vs_total"][2:] == (300, 300)
+    total_call = api.requests[13].url.params  # straight after the 13 windows
+    assert (total_call["size"], total_call["endDateTime"]) == ("1", api_time(WHOLE.end))
+    assert query(migrated, "SELECT checks_failed FROM ingest_runs") == [(0,)]
+
+
+def test_an_over_reporting_window_fails_fetched_vs_reported(migrated: Schema) -> None:
+    api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end))
+    api.over_report = 5  # each window holds about 23 events, so the tolerance is 2
+    s = run(migrated, api)
+    assert s is not None and s.checks_failed >= 1
+    assert check_rows(migrated, s.run_id)["fetched_vs_reported"][0] is False
+
+
+def test_a_total_above_what_the_windows_return_fails_unique_vs_total(migrated: Schema) -> None:
+    api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end))
+    api.total_extra = 20  # tolerance for 320 is 3
+    s = run(migrated, api)
+    assert s is not None
+    rows = check_rows(migrated, s.run_id)
+    assert rows["unique_vs_total"][0] is False and rows["unique_vs_total"][2:] == (300, 320)
+    assert rows["fetched_vs_reported"][0] is True
+
+
+def test_a_crowded_day_fails_window_over_cap(migrated: Schema) -> None:
+    busy = spread(1050, local_midnight(date(2026, 11, 1)), local_midnight(date(2026, 11, 2)))
+    s = run(migrated, FakeDiscovery(busy))
+    assert s is not None and check_rows(migrated, s.run_id)["window_over_cap"][0] is False
+
+
+def test_a_sharp_drop_fails_volume_vs_baseline(migrated: Schema) -> None:
+    with migrated.connect() as conn:
+        for _ in range(3):
+            conn.execute("INSERT INTO ingest_runs (source, status, unique_events)"
+                         " VALUES ('ticketmaster', 'succeeded', 1000)")
+    s = run(migrated, FakeDiscovery(spread(300, WHOLE.start, WHOLE.end)))
+    assert s is not None
+    assert check_rows(migrated, s.run_id)["volume_vs_baseline"][:2] == (False, "error")
+
+
+def test_warnings_are_recorded_but_dont_fail_the_run(migrated: Schema) -> None:
+    events = spread(20, WHOLE.start, WHOLE.end)
+    events[0] = FakeEvent(events[0].id, events[0].starts_at, onsale="2027-06-01T17:00:00Z")
+    s = run(migrated, FakeDiscovery(events))
+    assert s is not None and s.checks_failed == 0 and s.warnings == 1
+    assert check_rows(migrated, s.run_id)["implausible_onsales"][:2] == (False, "warning")
+
+
+def test_an_incomplete_run_skips_the_checks(migrated: Schema) -> None:
+    api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end))
+    api.failures[5] = quota_429
+    s = run(migrated, api)
+    assert s is not None and s.status == "partial"
+    assert check_rows(migrated, s.run_id) == {}
+
+
+def test_each_ingest_prunes_raw_older_than_retention(migrated: Schema) -> None:
+    api = FakeDiscovery(spread(50, WHOLE.start, WHOLE.end))
+    old = run(migrated, api)
+    assert old is not None
+    with migrated.connect() as conn:  # make the first run 4 days old; a newer run will exist
+        conn.execute("UPDATE ingest_runs SET started_at = now() - interval '4 days'")
+    run(migrated, api)  # newest succeeded run: always kept
+    newest = run(migrated, api)
+    assert newest is not None and newest.pruned_raw == 15
+    assert query(migrated, "SELECT count(*) FROM raw_responses WHERE run_id = %s", old.run_id) \
+        == [(0,)]
+    assert query(migrated, "SELECT pruned_raw FROM ingest_runs WHERE run_id = %s",
+                 newest.run_id) == [(15,)]
+
+
+# --- Exit codes: every kind of bad run shows red ------------------------------------------------
+
+@pytest.mark.parametrize("problem", ["check", "partial", "failed"])
+def test_the_ingest_command_exits_1_for_any_bad_run(
+    migrated: Schema, monkeypatch: pytest.MonkeyPatch, problem: str
+) -> None:
+    api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end))
+    if problem == "check":
+        api.over_report = 5
+    elif problem == "partial":
+        api.failures[5] = quota_429
+    else:
+        for n in range(5, 10):
+            api.failures[n] = lambda: httpx.Response(500)
+    use(monkeypatch, migrated, api)
+    assert cli.main(["ingest"]) == 1
+
+
+def test_the_checks_command_reports_a_run(
+    migrated: Schema, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    use(monkeypatch, migrated, FakeDiscovery(spread(50, WHOLE.start, WHOLE.end)))
+    assert cli.main(["ingest"]) == 0
+    with caplog.at_level(logging.INFO):
+        assert cli.main(["checks"]) == 0
+    assert "run 1: 7 checks, 0 failed, 0 warnings" in caplog.text
+    assert "unique_vs_total: passed (error)" in caplog.text

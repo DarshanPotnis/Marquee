@@ -54,6 +54,8 @@ class FakeDiscovery:
         self.sent: list[bytes] = []  # exact bytes of every 200 body, in order
         self.failures: dict[int, Callable[[], httpx.Response]] = {}  # 1-based request number
         self.available = 4_000
+        self.over_report = 0  # windows claim this many more events than they serve
+        self.total_extra = 0  # a size=1 count query (the whole-range total) claims this many more
 
     def update(self, event_id: str, **changes: object) -> None:
         self.events = [replace(e, **changes) if e.id == event_id else e  # type: ignore[arg-type]
@@ -74,9 +76,10 @@ class FakeDiscovery:
                 "status": "400 BAD_REQUEST"}]})
         matching = self._matching(q)
         chunk = matching[page * size:(page + 1) * size]
+        claimed = len(matching) + (self.total_extra if size == 1 else self.over_report)
         body: dict[str, object] = {
             "_links": {},
-            "page": {"size": size, "totalElements": len(matching),
+            "page": {"size": size, "totalElements": claimed,
                      "totalPages": math.ceil(len(matching) / size), "number": page},
         }
         if chunk:
