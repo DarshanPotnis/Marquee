@@ -1,6 +1,6 @@
 # 003: Boring stack, hourly schedule, 3-day raw retention
 
-**Status:** accepted for the stack; **schedule and retention proposed** 2026-10-06 (Phase 4), awaiting confirmation.
+**Status:** accepted, 2026-10-06. Schedule and retention confirmed (hourly, 3 days).
 
 ## Problem
 
@@ -36,7 +36,7 @@ There is no orchestrator, no queue and no warehouse.
 | Every 2 h | 180 | 21.9 | 66 MB | 153 MB | 306 MB | 22.8 |
 | Every 3 h | 120 | 14.6 | 44 MB | 102 MB | 204 MB | 34.2 |
 
-## Proposal
+## Decision
 
 **Run hourly, keep raw for 3 days.**
 
@@ -44,6 +44,18 @@ There is no orchestrator, no queue and no warehouse.
 - **Raw:** 131 MB is 26% of the 500 MB raw budget and 13% of Neon's 1 GB.
 - **Retention stays at PLAN §8's default of 3 days.** That's long enough to cover a weekend for debugging and repairs, and short enough to respect Ticketmaster's terms on caching.
 - **Neither fallback is needed** (every 3 hours, or storing only changed pages). The Phase 0 estimate for the same schedule was 1,041 MB of JSON text; storing exact gzip instead of `jsonb` is what brought it to 131 MB.
+
+## Compute (Neon free plan: 100 CU-hours a month)
+
+Our compute autoscales between 0.25 and 0.5 CU, and suspends after 5 minutes idle.
+
+- **Per run:** about 22 s of work (measured on 3 production runs) plus the 5-minute idle tail before suspend, so about **5.4 min awake**.
+- **Per month:** 720 runs × 5.4 min is about **64 hours awake**.
+- **Cost:** **16 CU-hours at 0.25 CU, 32 at 0.5 CU**, which is 16–32% of the allowance.
+- **What else uses compute:**
+  - CI and local tests: their own Postgres, so nothing.
+  - Dashboard visits: mostly inside windows when compute is already awake, so little.
+  - Manual `rebuild --verify`: about 23 s plus the idle tail.
 
 ## Not yet measured
 

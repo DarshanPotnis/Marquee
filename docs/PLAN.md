@@ -196,6 +196,9 @@ CREATE TABLE check_results (
 - Status is spelled `cancelled`.
 - Venue `latitude` and `longitude` are strings.
 - `sales.public.startDateTime` uses `1900-01-01T06:00:00Z` or `1900-01-01T18:00:00Z` as a placeholder on about 18% of events.
+  - An onsale is kept only if it's plausible: on or before the event's start (or the end of its local day, or for an undated event its `initialStartDate`) and no more than 2 years before it.
+  - An undated event with no original date accepts any past onsale.
+  - Anything else becomes NULL and is counted by reason in `ingest_runs.onsale_nulled`.
 - `dates.timezone` is often missing, while the venue's `timezone` never was.
 
 ---

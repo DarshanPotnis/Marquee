@@ -4,6 +4,22 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 4 follow-ups
+
+| Item | Result |
+|---|---|
+| **Password rotated** | You reset `neondb_owner` on both branches. Production connects with the new `MARQUEE_DATABASE_URL`, checked without printing it. `migrate`: `applied 0, already applied 2`. |
+| **Local tests on Docker** | `MARQUEE_TEST_DATABASE_URL` in `.env` now points at the local container (port 55432). The full suite takes **about 7 s** locally, against 12 min 24 s on Neon. CI is unchanged. |
+| **Undated onsale rule** (tests first, 7 new tests, **215 passing**) | An undated event's onsale is checked against `dates.initialStartDate` when present. Otherwise any past onsale is accepted. Placeholders, unparseable values and anything more than 2 years in the future are still nulled and counted. |
+| Proof on production | `rebuild` (the repair tool after a transform fix, which records no changes) → `rebuild --verify` with 0 differences → `ingest` run 3. The postponed show's **2024-07-26T17:00:00Z** onsale is **kept**; `too_early` went from 1 to **0**; run 3 had **0 changes**, reported 1,285, unique 1,304 (19 undated). |
+| **Schedule** | **Hourly with 3-day raw retention: confirmed** (decision 003). |
+| **Neon compute estimate** (hourly) | About 22 s of work plus the 5-minute idle tail is about **5.4 min awake per run**, about 64 h of wall time a month, so **16 CU-hours at 0.25 CU, up to 32 at 0.5 CU**, against the free plan's 100 (decision 003). |
+| **Neon console storage figure** | **Still to record:** the value in your message was blank (`___`). |
+
+Why `rebuild` came before `ingest`: an ingest straight after the fix would have recorded a "public_sale_start changed" row for that show, caused by our fix and not by Ticketmaster. Rebuild applies a transform fix to existing rows without inventing history.
+
+---
+
 ## 2026-10-06: Phase 4, raw, transform, change detection, load
 
 ### Done check on production (Neon main)

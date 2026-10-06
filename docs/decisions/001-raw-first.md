@@ -44,6 +44,15 @@ Once raw has been pruned:
 
 A test proves the pruning case: after deleting a run's raw, rebuild leaves the vanished event and its `first_seen_run` alone, and `--verify` reports both differences.
 
+## Used for real
+
+On 2026-10-06, the undated-event onsale rule was fixed. The workflow was:
+1. `rebuild` re-applied the new rule to the existing rows from raw, recording no changes.
+2. `rebuild --verify` found 0 differences.
+3. The next ingest recorded 0 changes.
+
+A postponed show's genuine 2024-07-26 onsale, wrongly nulled before the fix, is now kept. Had the fix gone out by ingest alone, the change log would have shown a public-sale-start "change" that never happened at Ticketmaster.
+
 ## What would change my mind
 
 - **Retention long enough to cover the whole history we care about.** Then a from-scratch rebuild into new tables, swapped in atomically, becomes attractive.
