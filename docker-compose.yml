@@ -1,0 +1,18 @@
+# Local Postgres for integration tests, same major version as Neon (18). Not used in production.
+#   docker compose up -d --wait
+#   TEST_DATABASE_URL=postgresql://marquee:marquee@localhost:55432/marquee_test uv run pytest
+#   docker compose down -v
+services:
+  postgres:
+    image: postgres:18.6
+    environment:
+      POSTGRES_USER: marquee
+      POSTGRES_PASSWORD: marquee
+      POSTGRES_DB: marquee_test
+    ports:
+      - "55432:5432"  # not 5432, which a local Postgres often already uses
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marquee -d marquee_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
