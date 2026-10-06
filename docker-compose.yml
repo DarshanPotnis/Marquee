@@ -1,7 +1,10 @@
 # Local Postgres for integration tests, same major version as Neon (18). Not used in production.
 #   docker compose up -d --wait
-#   TEST_DATABASE_URL=postgresql://marquee:marquee@localhost:55432/marquee_test uv run pytest
+#   set TEST_DATABASE_URL in .env to postgresql://marquee:marquee@localhost:55432/marquee_test
+#   uv run pytest
 #   docker compose down -v
+# Put the URL in .env rather than exporting it: a value that differs between the shell and .env
+# is refused, so .env stays the single source locally.
 services:
   postgres:
     image: postgres:18.6
