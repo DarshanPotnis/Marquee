@@ -4,6 +4,32 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 1, skeleton
+
+### Done check
+
+| Check | Result |
+|---|---|
+| `ruff check` | clean |
+| `mypy` (strict, `src/marquee`) | clean, 4 files |
+| `pytest`, locally against the Neon dev branch | 51 passed |
+| `python -m marquee migrate` on Neon main | run 1: `applied 1 (001_init.sql), already applied 0`; run 2: `applied 0, already applied 1`; both exit 0 |
+| Neon main afterwards | 9 tables (8 from PLAN §3 + `schema_migrations`), 0 advisory locks held |
+| CI (ruff, mypy, pytest against Postgres 18.6) | green; see the Phase 1 push |
+
+### Surprises
+
+1. **A shell variable nearly chose the database.** `~/.zshrc` (lines 32 and 35) exports `DATABASE_URL` for another project: a JDBC URL to a local `yardsdb`.
+   - The first config let the shell win over `.env`, so the first migrate attempt parsed that URL and failed.
+   - If it had been a valid Postgres URL, migrate would have created our tables in the other project's database.
+   - **Fix:** a variable set differently in the shell and in `.env` is now refused. The error names the variable and never shows the values.
+   - Until that `~/.zshrc` line is removed or renamed, run Marquee as `env -u DATABASE_URL uv run python -m marquee …`.
+2. **psycopg quotes the connection string in parse errors**, so a malformed URL would print its password in a traceback. **Fix:** `db.connect` removes the password and suppresses the original exception.
+3. **Neon runs Postgres 18.6**, where PLAN said 16. Local Docker and CI now use `postgres:18.6`.
+4. **One-off command-line overrides are refused locally.** `TEST_DATABASE_URL=… uv run pytest` clashes with `.env` and is refused, which is the intended consequence of fix 1. To test against the local container, put its URL in `.env`. CI has no `.env`, so it's unaffected.
+
+---
+
 ## 2026-10-06: Phase 0 close-out, final query and decisions
 
 ### The demo number
