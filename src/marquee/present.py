@@ -99,3 +99,23 @@ def _clock(t: time) -> str:
 
 def _plural(n: int, unit: str) -> str:
     return f"{n} {unit}" if n == 1 else f"{n} {unit}s"
+
+
+def checks_summary(failed: int, warnings: int) -> str:
+    return f"{failed} failed · {_plural(warnings, 'warning')}"
+
+
+def event_time(t: time | None) -> str:
+    return "TBA" if t is None else _clock(t)
+
+
+_FIELD_LABELS = {"status": "Status", "local_date": "Date", "local_time": "Time",
+                 "venue": "Venue", "public_sale_start": "Public onsale"}
+
+
+def field_label(field: str) -> str:
+    return _FIELD_LABELS.get(field, field)
+
+
+def megabytes(size: int) -> str:
+    return f"{size / 1024 ** 2:,.1f} MB"
