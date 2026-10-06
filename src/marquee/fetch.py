@@ -6,7 +6,7 @@ All API traffic goes through TicketmasterClient. Window arithmetic lives in wind
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,10 +19,13 @@ PAGE_SIZE = 200  # the API's maximum (api-notes §5)
 CAP = 1_000  # documented paging limit; the observed 1,200 is a margin we don't rely on
 PAGING_TOO_DEEP = "DIS1035"
 
+# Called with every page the moment it arrives (probe pages too), so ingest can save it at once.
+OnPage = Callable[["Window | None", Page], None]
+
 
 @dataclass(frozen=True)
 class WindowResult:
-    window: Window
+    window: Window | None  # None for an undated search (the TBA/TBD calls)
     pages: tuple[Page, ...]  # page 0 first
     calls: int  # API calls spent on this window, including retries and any refused page
     stopped_by: str | None  # set when the API refused to page deeper
@@ -47,31 +50,39 @@ class WindowResult:
 def fetch_window(
     client: TicketmasterClient,
     base: Mapping[str, str],
-    window: Window,
+    window: Window | None,
     *,
     first_page: Page | None = None,
     calls_before: int | None = None,
+    on_page: OnPage | None = None,
 ) -> WindowResult:
-    """Every page of one window. Stops, and says so, if the API refuses to page deeper.
+    """Every page of one window (or of an undated search, with window None).
 
-    `first_page` lets a caller that already fetched page 0 (to decide whether to split) reuse it;
-    `calls_before` is the client's call count before that page, so `calls` stays honest.
+    Stops, and says so, if the API refuses to page deeper. `first_page` lets a caller that
+    already fetched page 0 (to decide whether to split) reuse it, and that caller has already
+    passed it to on_page; `calls_before` is the client's call count before that page.
     """
     start_calls = client.calls if calls_before is None else calls_before
-    page_0 = first_page if first_page is not None else client.search_events(
-        _params(base, window, 0)
-    )
+    if first_page is None:
+        page_0 = client.search_events(_params(base, window, 0))
+        if on_page is not None:
+            on_page(window, page_0)
+    else:
+        page_0 = first_page
     pages = [page_0]
     stopped_by = None
     # An empty result has totalPages 0 (api-notes §5): page 0 was all there is.
     for number in range(1, int(page_0.body["page"]["totalPages"])):
         try:
-            pages.append(client.search_events(_params(base, window, number)))
+            page = client.search_events(_params(base, window, number))
         except ApiError as exc:
             if exc.code != PAGING_TOO_DEEP:
                 raise
             stopped_by = f"{exc.code} at page {number}"
             break
+        pages.append(page)
+        if on_page is not None:
+            on_page(window, page)
     return WindowResult(window, tuple(pages), client.calls - start_calls, stopped_by)
 
 
@@ -124,6 +135,7 @@ def fetch_range(
     windows: Sequence[Window],
     *,
     split_threshold: int = CAP,
+    on_page: OnPage | None = None,
 ) -> RangeResult:
     """Fetch every window, halving any whose page 0 reports more than `split_threshold`.
 
@@ -138,10 +150,13 @@ def fetch_range(
         window = todo.popleft()
         before = client.calls
         page_0 = client.search_events(_params(base, window, 0))
+        if on_page is not None:
+            on_page(window, page_0)
         reported = int(page_0.body["page"]["totalElements"])
         halves = split(window) if reported > split_threshold else None
         if halves is None:
-            final.append(fetch_window(client, base, window, first_page=page_0, calls_before=before))
+            final.append(fetch_window(client, base, window, first_page=page_0,
+                                      calls_before=before, on_page=on_page))
         else:
             probes.append(WindowResult(window, (page_0,), client.calls - before, None))
             todo.extendleft(reversed(halves))  # keep date order
@@ -154,12 +169,7 @@ def events(page: Page) -> list[dict[str, Any]]:
     return found if isinstance(found, list) else []
 
 
-def _params(base: Mapping[str, str], window: Window, page: int) -> dict[str, str]:
-    return {
-        **base,
-        "startDateTime": api_time(window.start),
-        "endDateTime": api_time(window.end),
-        "size": str(PAGE_SIZE),
-        "sort": "id,asc",
-        "page": str(page),
-    }
+def _params(base: Mapping[str, str], window: Window | None, page: int) -> dict[str, str]:
+    dates = {} if window is None else {
+        "startDateTime": api_time(window.start), "endDateTime": api_time(window.end)}
+    return {**base, **dates, "size": str(PAGE_SIZE), "sort": "id,asc", "page": str(page)}

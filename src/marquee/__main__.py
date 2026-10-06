@@ -121,7 +121,7 @@ def run_fetch_windows(
     unique = len(result.unique_ids)
     proven = unique == reported_now
     over_cap = ", ".join(
-        f"{w.window.first_day} ({w.reported} reported"
+        f"{w.window.first_day if w.window else 'undated'} ({w.reported} reported"
         + (f", stopped by {w.stopped_by})" if w.stopped_by else ")")
         for w in result.over_cap
     ) or "none"
