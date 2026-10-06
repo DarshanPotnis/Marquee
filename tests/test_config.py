@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from marquee.config import ConfigError, load_settings, settings_from_environment
+from marquee.config import ConfigError, load_settings, read_environment, settings_from_environment
 
 DB_URL = "postgresql://marquee:s3cret-pw@db.example.test/marquee"
 
@@ -73,14 +73,89 @@ def test_settings_are_frozen() -> None:
         s.raw_retention_days = 9  # type: ignore[misc]
 
 
-def test_environment_variables_override_the_dotenv_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("url", ["postgresql://u@h/db", "postgres://u@h/db"])
+def test_postgres_urls_are_accepted(url: str) -> None:
+    assert load_settings({"DATABASE_URL": url}).database_url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "jdbc:postgresql://localhost/otherdb",
+        "mysql://u:s3cret-pw@h/db",
+        "host=h password=s3cret-pw",
+    ],
+)
+def test_a_non_postgres_database_url_is_refused_without_echoing_it(url: str) -> None:
+    with pytest.raises(ConfigError, match="DATABASE_URL") as err:
+        load_settings({"DATABASE_URL": url})
+    assert "s3cret-pw" not in str(err.value)
+    assert "otherdb" not in str(err.value)
+
+
+@pytest.fixture
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    for name in ("DATABASE_URL", "TEST_DATABASE_URL", "TM_API_KEY", "RAW_RETENTION_DAYS",
+                 "SCHEDULE_INTERVAL_MINUTES"):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def test_dotenv_supplies_what_the_environment_lacks(
+    tmp_path: Path, clean_env: pytest.MonkeyPatch
 ) -> None:
     dotenv = tmp_path / ".env"
     dotenv.write_text(f"DATABASE_URL = {DB_URL}\nRAW_RETENTION_DAYS=5\n")
-    for name in ("DATABASE_URL", "TM_API_KEY", "SCHEDULE_INTERVAL_MINUTES"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("RAW_RETENTION_DAYS", "7")
     s = settings_from_environment(dotenv)
     assert s.database_url == DB_URL
-    assert s.raw_retention_days == 7
+    assert s.raw_retention_days == 5
+
+
+def test_environment_alone_works_without_a_dotenv_file(
+    tmp_path: Path, clean_env: pytest.MonkeyPatch
+) -> None:
+    # CI has no .env; repository secrets arrive as environment variables.
+    clean_env.setenv("DATABASE_URL", DB_URL)
+    assert settings_from_environment(tmp_path / "missing.env").database_url == DB_URL
+
+
+def test_a_variable_set_differently_in_environment_and_dotenv_is_refused(
+    tmp_path: Path, clean_env: pytest.MonkeyPatch
+) -> None:
+    # A DATABASE_URL exported by another project's shell setup must never silently pick our DB.
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"DATABASE_URL={DB_URL}\n")
+    clean_env.setenv("DATABASE_URL", "postgresql://other:0ther-pw@elsewhere.test/otherdb")
+    with pytest.raises(ConfigError, match="DATABASE_URL") as err:
+        settings_from_environment(dotenv)
+    assert "s3cret-pw" not in str(err.value)
+    assert "0ther-pw" not in str(err.value)
+
+
+def test_the_same_value_in_both_places_is_fine(
+    tmp_path: Path, clean_env: pytest.MonkeyPatch
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"DATABASE_URL = {DB_URL}\n")
+    clean_env.setenv("DATABASE_URL", DB_URL)
+    assert settings_from_environment(dotenv).database_url == DB_URL
+
+
+def test_a_blank_dotenv_value_does_not_clash(
+    tmp_path: Path, clean_env: pytest.MonkeyPatch
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"DATABASE_URL={DB_URL}\nTM_API_KEY=\n")
+    clean_env.setenv("TM_API_KEY", "from-ci-secret")
+    assert settings_from_environment(dotenv).tm_api_key == "from-ci-secret"
+
+
+def test_read_environment_merges_without_clashes(
+    tmp_path: Path, clean_env: pytest.MonkeyPatch
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("TEST_DATABASE_URL=postgresql://t@h/test\n")
+    clean_env.setenv("TM_API_KEY", "k")
+    env = read_environment(dotenv)
+    assert env["TEST_DATABASE_URL"] == "postgresql://t@h/test"
+    assert env["TM_API_KEY"] == "k"

@@ -8,16 +8,16 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from dotenv import dotenv_values
 from psycopg import sql
+
+from marquee.config import read_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _test_database_url() -> str | None:
-    url = os.environ.get("TEST_DATABASE_URL") or dotenv_values(ROOT / ".env").get(
-        "TEST_DATABASE_URL"
-    )
+    # Same rule as the app: if the shell and .env disagree, fail rather than guess.
+    url = read_environment(ROOT / ".env").get("TEST_DATABASE_URL")
     return (url or "").strip() or None
 
 
