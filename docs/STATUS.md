@@ -4,6 +4,43 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 6, dashboard
+
+### Done check on production
+
+| Check | Result |
+|---|---|
+| **Read-only, proven on Neon** | Through a dashboard connection, `CREATE TABLE` was refused with `ReadOnlySqlTransaction` (inside a transaction rolled back regardless). `statement_timeout` = 5s. |
+| Render (Streamlit `AppTest`, headless, real data) | **0 exceptions**, 3.4 s |
+
+| Panel | What it showed |
+|---|---|
+| Scope | Ticketmaster LA market (DMA 324) · Music · next 90 days · face-value data, no resale prices |
+| Freshness | **Fresh** · last good run 53 minutes ago (Oct 6, 1:19 PM PDT) |
+| **Completeness (headline)** | **1,289 reported · 1,289 received · 0 missing**; +19 undated (TBA/TBD) · run 4 |
+| Checks | 0 failed · 1 **WARNING**: `venues_outside_ca`, the 2 Canadian venues |
+| New shows | **5 real new shows**, first seen in runs 2–4 (run 1 is the baseline, not news) |
+| Changes | "No changes in the last 24 hours." (runs 2–4 recorded 0) |
+| Public onsales, next 7 days | 9 |
+| Upcoming (default next 14 days) | 339 events |
+| Last 24 runs | 4 |
+| Database | 17.9 MB of 1,024 MB (1.7%) |
+
+### Tests
+
+- **320 pass** (about 20 s on Docker). ruff and mypy strict are clean, and mypy now covers `dashboard/app.py` too (the package ships a `py.typed` marker).
+- **Read-only:** `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE` and `CREATE TABLE` each fail through a dashboard connection.
+- **Empty database:** every query returns an empty answer, and the app shows every empty-state message.
+- **Changes** read show / venue / event date / old → new, newest first, with venue IDs shown as names.
+- **Words for problems:** `WARNING`, `PARTIAL` and `FAILED` appear in words in both the headline and the tables.
+
+### Notes
+
+- **mypy reported false errors from a stale cache** after `py.typed` was added; clearing `.mypy_cache` fixed it. The cache folder is now gitignored.
+- **Neon console storage figure: skipped by decision.** The SQL measurement (`pg_database_size`, per-table sizes) is the record.
+
+---
+
 ## 2026-10-06: Phase 5, checks, run record, prune
 
 ### Done check on production
