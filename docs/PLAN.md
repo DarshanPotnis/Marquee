@@ -266,7 +266,7 @@ marquee/
 ├── CLAUDE.md
 ├── pyproject.toml            # deps, ruff, mypy and pytest config (uv; uv.lock committed)
 ├── docker-compose.yml        # local Postgres 18 for tests (same major version as Neon)
-├── .env.example              # TM_API_KEY, DATABASE_URL, TEST_DATABASE_URL, settings
+├── .env.example              # TM_API_KEY, MARQUEE_DATABASE_URL, MARQUEE_TEST_DATABASE_URL, settings
 ├── migrations/001_init.sql
 ├── src/marquee/
 │   ├── __main__.py           # CLI: migrate | ingest | rebuild | checks | prune
@@ -323,7 +323,7 @@ Every phase starts with a plain-English plan and ends with its **done check run 
 | 4 | **Raw, transform, change detection, load.** | 2 h | Tests: transform handles a missing venue, missing attractions, a TBA date, a missing time (`noSpecificTime`), lat/long as strings and the 1900 onsale placeholder; loading twice gives identical counts; `rebuild` reproduces identical clean tables (row counts plus a checksum). Change detection, a pure function with tests first, writes one `event_changes` row per changed field (status, local date, local time, venue, public sale start), none when nothing changed, and none on a first sighting. On-disk raw size per run is measured and the schedule is chosen (§4). |
 | 5 | **Checks, run record, prune.** | 1 h | Each check has a passing and a failing test. A real run shows its checks in `check_results`. |
 | 6 | **Dashboard.** | 1.5 h | It shows the freshness badge, the last 24 runs (calls, reported vs fetched, status), the checks panel, an upcoming-events table with filters (date, venue, status), events per week, changes since the last day (new shows via `first_seen_run`; postponed, cancelled and rescheduled shows; date moves), one small panel of public onsales in the next 7 days (Phase 0: 6 such events; the 1900-01-01 placeholder reads as no date), and database size against the 1 GB limit. |
-| 7 | **Schedule.** `ingest.yml` runs at minute 17 on the schedule the §4 budgets allow (hourly if both fit), with secrets `TM_API_KEY` and `DATABASE_URL` (Neon). | 45 min | Two scheduled runs have succeeded and appear on the dashboard, and measured calls and storage per run match the budget. |
+| 7 | **Schedule.** `ingest.yml` runs at minute 17 on the schedule the §4 budgets allow (hourly if both fit), with secrets `TM_API_KEY` and `MARQUEE_DATABASE_URL` (Neon). | 45 min | Two scheduled runs have succeeded and appear on the dashboard, and measured calls and storage per run match the budget. |
 | 8 | **Docs and rehearsal.** README, decision records, `STATUS.md`. | 1 h | A fresh clone, following only the README, reaches a working dashboard. The demo is rehearsed twice. |
 
 ### Cut line (if you're behind at hour 6)

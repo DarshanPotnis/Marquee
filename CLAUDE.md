@@ -20,9 +20,9 @@ Read `docs/PLAN.md` before doing anything. It is the source of truth for scope, 
 - **SQL:** schema lives in `migrations/`. Queries are always parameterized. Never format API values into SQL strings.
 - **Errors:** fail loudly with context. No bare `except`. Retries happen only where PLAN.md §6 says.
 - **Logging:** standard `logging`, with one summary line per run (windows, calls, reported, fetched, unique, status). **Never log the API key** or any URL that contains it.
-- **Config** comes from environment variables (`.env` locally, repository secrets in CI). `.env` and `local/` are gitignored.
+- **Config** comes from environment variables (`.env` locally, repository secrets in CI). Database URLs use Marquee's own names, `MARQUEE_DATABASE_URL` and `MARQUEE_TEST_DATABASE_URL`; the generic `DATABASE_URL` is never read. A Marquee variable set differently in the shell and in `.env` is refused. `.env` and `local/` are gitignored.
 - **Dependencies:** only `httpx`, `psycopg[binary]`, `python-dotenv` and `streamlit`, plus `pytest`, `ruff` and `mypy` for development. Anything else needs a reason and my approval.
-- **Tests:** unit tests use no network (`httpx.MockTransport`, an injected clock and sleep). Integration tests use `TEST_DATABASE_URL` (local Docker Postgres or a Neon dev branch) and skip cleanly if it isn't set.
+- **Tests:** unit tests use no network (`httpx.MockTransport`, an injected clock and sleep). Integration tests use `MARQUEE_TEST_DATABASE_URL` (local Docker Postgres or a Neon dev branch) and skip cleanly if it isn't set.
 - Keep functions small and named for what they do. Comments explain **why**, not what.
 
 ## Data and the provider's terms
