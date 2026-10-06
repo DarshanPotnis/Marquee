@@ -205,5 +205,15 @@ def weekly_caption(first_day: date, last_day: date) -> str:
     return "Later weeks are naturally lower: shows further out are announced later" + ending
 
 
+def entered_caption(dates: list[date], today: date) -> str:
+    """The shows that appeared only because the 90-day window moved forward, as one line."""
+    if not dates:
+        return "Entered the 90-day window: none in the last 24 hours."
+    first, last = event_date(min(dates), today), event_date(max(dates), today)
+    span = first if first == last else f"{first} to {last}"
+    return (f"Entered the 90-day window: {_plural(len(dates), 'show')} ({span}), in range only "
+            "because the window moved forward.")
+
+
 def _monday(day: date) -> date:
     return day - timedelta(days=day.weekday())

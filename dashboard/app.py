@@ -147,14 +147,18 @@ def checks_panel(d: dict[str, Any]) -> None:
 def changes_panel(d: dict[str, Any]) -> None:
     st.subheader("Changes in the last 24 hours")
     day = today(d["now"])
-    st.markdown("**New shows**")
-    if not d["new_shows"]:
-        st.info("No new shows in the last 24 hours.")
+    listed = [s for s in d["new_shows"] if not s.entered]
+    st.markdown("**Newly listed**")
+    if not listed:
+        st.info("No newly listed shows in the last 24 hours.")
     else:
         st.dataframe([{"First seen": present.la_time(s.first_seen_at), "Show": s.show,
                        "Venue": s.venue or "", "Date": present.event_date(s.event_date, day),
-                       "Time": present.event_time(s.event_time)} for s in d["new_shows"]],
+                       "Time": present.event_time(s.event_time)} for s in listed],
                      hide_index=True, width="stretch")
+    # Every LA midnight a new day joins the range; its shows are first seen, not newly listed.
+    st.caption(present.entered_caption(
+        [s.event_date for s in d["new_shows"] if s.entered and s.event_date], day))
     st.markdown("**Changes**")
     if not d["changes"]:
         st.info("No changes in the last 24 hours.")

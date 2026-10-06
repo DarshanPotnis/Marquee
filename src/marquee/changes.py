@@ -1,7 +1,8 @@
 """Change detection: what a desk cares about when a known event comes back different. Pure.
 
 Compared on transformed values, so an implausible onsale that became NULL can't flap. A first
-sighting is not a change (new shows come from events.first_seen_run).
+sighting is not a change (new shows come from events.first_seen_run, and entered_window tells a
+newly listed show from one the moving 90-day window has only just reached).
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from dataclasses import dataclass, fields
 from datetime import UTC, date, datetime, time
 
 from marquee.transform import EventRow
+from marquee.windows import LA
 
 TRACKED = ("status", "local_date", "local_time", "venue", "public_sale_start")
 
@@ -71,3 +73,17 @@ def _text(value: object) -> str | None:
     if isinstance(value, date | time):
         return value.isoformat()
     return str(value)
+
+
+def entered_window(starts_at: datetime | None, local_date: date | None,
+                   previous_end: datetime | None) -> bool:
+    """True when a show seen for the first time lay beyond the previous complete run's range: it
+    appeared because the window moved forward, not because it was just listed. Undated shows,
+    and shows with no earlier range to compare with, count as newly listed."""
+    if previous_end is None:
+        return False
+    if starts_at is not None:
+        return starts_at > previous_end  # the API includes the range's end
+    if local_date is not None:  # no specific time: previous_end is the first LA day outside
+        return local_date >= previous_end.astimezone(LA).date()
+    return False

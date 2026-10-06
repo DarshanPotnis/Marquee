@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 
 from marquee import db
+from marquee.changes import entered_window
 from marquee.db import Connection
 
 STATEMENT_TIMEOUT = "5s"
@@ -71,6 +72,7 @@ class NewShow:
     venue: str | None
     event_date: date | None
     event_time: time | None
+    entered: bool  # only just inside the moving 90-day window, rather than newly listed
 
 
 @dataclass(frozen=True)
@@ -184,16 +186,22 @@ def recent_changes(conn: Connection, since: datetime, limit: int = 200) -> list[
 
 
 def new_shows(conn: Connection, since: datetime, limit: int = 200) -> list[NewShow]:
-    """Shows first seen since `since`. The first-ever run is the baseline, not news."""
+    """Shows first seen since `since`, each judged against the range of the last succeeded run
+    before the one that first saw it. With no such run, that run was the baseline, not news."""
     rows = conn.execute(
-        """SELECT r.started_at, e.name, v.name, e.local_date, e.local_time
+        """SELECT r.started_at, e.name, v.name, e.local_date, e.local_time, e.starts_at,
+                  p.range_end
            FROM events e
            JOIN ingest_runs r ON r.run_id = e.first_seen_run
+           JOIN LATERAL (SELECT range_end FROM ingest_runs
+                         WHERE status = 'succeeded' AND run_id < e.first_seen_run
+                         ORDER BY run_id DESC LIMIT 1) p ON true
            LEFT JOIN venues v ON v.venue_id = e.venue_id
-           WHERE r.started_at >= %s AND e.first_seen_run > (SELECT min(run_id) FROM ingest_runs)
+           WHERE r.started_at >= %s
            ORDER BY r.started_at DESC, e.local_date NULLS LAST, e.name
            LIMIT %s""", (since, limit)).fetchall()
-    return [NewShow(*r) for r in rows]
+    return [NewShow(r[0], r[1], r[2], r[3], r[4], entered=entered_window(r[5], r[3], r[6]))
+            for r in rows]
 
 
 def onsales_between(conn: Connection, start: datetime, end: datetime) -> list[Onsale]:
