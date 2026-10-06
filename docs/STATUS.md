@@ -4,6 +4,48 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 5, checks, run record, prune
+
+### Done check on production
+
+| Step | Result |
+|---|---|
+| `migrate` | `applied 1 (003_check_severity_and_prune.sql), already applied 2` |
+| `ingest` run 4 | **succeeded, exit 0**: 13 windows, 16 calls (13 + the whole-range total + 2 undated); reported = fetched = 1,289; unique 1,308 (19 undated); 0 changes; **checks: 7 run, 0 failed, 1 warning**; pruned 0 |
+| `fetched_vs_reported` | passed: 13 windows within tolerance, largest gap 0 |
+| `unique_vs_total` | passed: unique 1,289 vs total 1,289, difference 0 (tolerance 12) |
+| `volume_vs_baseline` | passed, **computed for real**: 1,308 against the median 1,303 of runs 1–3 (floor 912.1) |
+| `window_over_cap` | passed: no window over 1,000 |
+| `events_without_venue` | passed: 0 |
+| `implausible_onsales` | passed: `placeholder_1900` 243 (known) |
+| `venues_outside_ca` | **warning**: Studio Theatre (Perth, ON); The Olaus Ice Palace (Rossland, BC) |
+| `checks` report | prints all 7, ordered by severity |
+| `prune --dry-run` | cutoff 2026-10-03T20:19:31Z (3 days); 0 raw to delete; always keeping run 4 (latest succeeded) |
+
+### Tests
+
+- **256 pass** locally (about 12 s on Docker); ruff and mypy are clean.
+- **Every check** has a passing and a failing test.
+- **Every error check also fails end to end** through the fake API:
+  - over-reported windows,
+  - a total above what the windows return,
+  - a 1,050-event day,
+  - a sharp drop against seeded prior runs.
+- **Breakage test:** each change below made its tests fail.
+  - `ingest` ignoring partial and failed runs in its exit code: 2 fail.
+  - `prune` not keeping the latest succeeded run: 1 fails.
+  - Tolerance set to 0: 8 fail.
+
+### Surprises
+
+1. **Ingest's own prune affected the prune tests' setup.** Building aged runs through `ingest` pruned the oldest run before the test's own prune ran. That's correct behaviour; the helper now uses a 14-day retention, so only the pruning under test happens.
+2. **Floating point:** 0.7 × 1,300 is 909.999… in floats, so a run at exactly 70% of the median could have been judged wrongly. The floor now uses exact fractions; the boundary test caught it.
+3. **The whole-range total isn't saved as raw.** It's a count used by a check, not data. A run is 16 calls but 15 raw pages.
+
+**The Neon console storage figure is still to record.** Both messages had a blank (`___ MB`).
+
+---
+
 ## 2026-10-06: Phase 4 follow-ups
 
 | Item | Result |

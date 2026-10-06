@@ -260,15 +260,40 @@ Running out of storage is a silent failure too, so the dashboard shows database 
 
 ---
 
-## 5. Checks (after every run)
+## 5. Checks (after every complete run)
 
-| Check | Rule | Catches |
-|---|---|---|
-| `fetched_vs_reported` | Per window, received equals `totalElements`, within a small tolerance (totals can shift while paging) | Paging bugs, the cap, dropped pages |
-| `volume_vs_baseline` | `unique_events` ≥ 70% of the median of the last 7 successful runs (skipped until 3 runs exist) | A source silently returning less |
-| `window_over_cap` | No window ended over 1,000 after splitting | Data we know we couldn't fetch |
-| `events_without_venue` | Count only; a warning, not a failure | Upstream data gaps |
-| `venues_outside_ca` | Count and list venues whose state isn't CA; a warning, not a failure | Out-of-area venues tagged DMA 324 (Phase 0: 2 venues in Canada, 3 events) |
+The rules are pure functions (`checks.py`) over a snapshot of the run's facts. Results go to `check_results` with a severity (migration `003`):
+- **error:** the run's data can't be trusted as complete.
+- **warning:** something upstream looks off.
+
+A run that didn't complete (`partial` or `failed`) skips the checks; it's already a bad run.
+
+**Tolerance.** Two counts may differ by **max(2 events, 1%)**. Totals drift by a few events an hour (1,276 to 1,282 in one morning), and a strict equality would turn the scheduled run red for no real reason. False alarms teach people to ignore alarms.
+
+| Check | Severity | Rule | Catches |
+|---|---|---|---|
+| `fetched_vs_reported` | error | In every final window, events received equal `totalElements`, within tolerance | Paging bugs, the cap, dropped pages |
+| `unique_vs_total` | error | Unique event IDs across the windows equal the API's total for the whole range, read right after, within tolerance. The exact difference is recorded. Costs 1 call a run. | Gaps between windows; anything the per-window check can't see |
+| `window_over_cap` | error | No final window reports more than 1,000 | Data we know we couldn't fetch |
+| `volume_vs_baseline` | error | `unique_events` ≥ 70% of the median of the last 7 succeeded runs (exact fractions; skipped until 3 exist) | A source silently returning less |
+| `events_without_venue` | warning | None of this run's events lacks a venue | Upstream data gaps |
+| `venues_outside_ca` | warning | Count and list venues whose state isn't CA | Out-of-area venues tagged DMA 324 (2 in Canada) |
+| `implausible_onsales` | warning | Every nulled onsale is the known 1900 placeholder; any other reason is listed | A new kind of placeholder, or a rule misfiring |
+
+**Alert path: how a failure reaches a person.**
+
+1. `ingest` exits **non-zero for any bad run**: `partial` (budget or quota), `failed`, or an **error-level check failed**.
+2. The scheduled GitHub Actions run therefore **turns red**.
+3. GitHub notifies **the user who created the scheduled workflow**, or whoever later changed its cron or re-enabled it. Here that's the repo owner, who pushes it.
+4. The notification arrives **by email and/or on the web**, according to that user's GitHub Actions notification settings, which can be set to failed runs only. Phase 7 checks the setting.
+
+(GitHub docs: "Notifications for scheduled workflows are sent to the user who initially created the workflow.") Warnings don't make the run red; they show on the dashboard. This path goes into the README in Phase 8.
+
+**Prune** runs at the end of every run:
+- It deletes the raw of **whole runs** that started more than `RAW_RETENTION_DAYS` ago.
+- It **always keeps the latest succeeded run's raw**, so a rebuild has one complete run even if the scheduler stopped.
+- Run records and check results are kept.
+- Manual use: `python -m marquee prune [--dry-run]`. Report a run's checks with `python -m marquee checks [--run N]`.
 
 **Freshness** is computed by the dashboard, not stored: the age since the last `succeeded` run, measured against the schedule interval (a setting). Green under 1.5 intervals, yellow under 3 intervals, red beyond that. For an hourly schedule that's 90 minutes and 3 hours.
 
