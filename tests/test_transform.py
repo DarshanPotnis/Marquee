@@ -223,20 +223,60 @@ def test_a_date_only_event_counts_as_starting_at_the_end_of_its_local_day() -> N
     assert rows.onsale_nulled == {"after_event": 1}
 
 
+# An undated (TBA) event has no start to compare with. A postponed show's onsale can be years old
+# and still real (Phase 4: a genuine 2024-07-26 onsale was wrongly nulled), so: use the original
+# date when the API gives one (dates.initialStartDate); otherwise accept any past onsale, and only
+# reject placeholders, unparseable values and onsales more than 2 years in the future.
+
+def undated_event(value: str, initial: dict[str, str] | None = None) -> dict[str, Any]:
+    dates: dict[str, Any] = {"start": {"dateTBA": True}, "status": {"code": "postponed"}}
+    if initial is not None:
+        dates["initialStartDate"] = initial
+    return event(dates=dates, sales__public__startDateTime=value)
+
+
 @pytest.mark.parametrize(
     ("value", "kept", "reason"),
     [
-        ("2026-12-01T18:00:00Z", True, None),  # within 2 years of the run
+        ("2024-07-26T17:00:00Z", True, None),  # the real case from Phase 4: years before the run
+        ("2019-03-01T17:00:00Z", True, None),  # any past onsale is accepted
+        ("2027-06-01T17:00:00Z", True, None),  # within 2 years of the run
         ("2029-01-01T18:00:00Z", False, "too_late"),  # more than 2 years after the run
-        ("2024-01-01T18:00:00Z", False, "too_early"),  # more than 2 years before the run
         ("1900-01-01T18:00:00Z", False, "placeholder_1900"),
+        ("soon", False, "unparseable"),
     ],
 )
-def test_an_undated_events_onsale_must_be_within_2_years_of_the_run(
+def test_an_undated_event_without_an_original_date_accepts_past_onsales(
     value: str, kept: bool, reason: str | None
 ) -> None:
-    tba = event(dates={"start": {"dateTBA": True}, "status": {"code": "postponed"}},
-                sales__public__startDateTime=value)
-    rows, ev = one(tba)
+    rows, ev = one(undated_event(value))
     assert (ev.public_sale_start is not None) == kept
     assert rows.onsale_nulled == ({} if reason is None else {reason: 1})
+
+
+ORIGINAL = {"localDate": "2026-08-30", "localTime": "18:00:00", "dateTime": "2026-08-31T01:00:00Z"}
+
+
+@pytest.mark.parametrize(
+    ("value", "kept", "reason"),
+    [
+        ("2026-05-01T17:00:00Z", True, None),  # before the original date
+        ("2026-08-31T01:00:00Z", True, None),  # on it
+        ("2026-09-15T17:00:00Z", False, "after_event"),  # after the original date
+        ("2024-01-01T17:00:00Z", False, "too_early"),  # more than 2 years before it
+    ],
+)
+def test_an_undated_event_with_an_original_date_is_checked_against_it(
+    value: str, kept: bool, reason: str | None
+) -> None:
+    rows, ev = one(undated_event(value, ORIGINAL))
+    assert (ev.public_sale_start is not None) == kept
+    assert rows.onsale_nulled == ({} if reason is None else {reason: 1})
+
+
+def test_an_original_date_without_a_time_counts_as_the_end_of_that_local_day() -> None:
+    date_only = {"localDate": "2026-08-30"}  # ends 2026-08-31T07:00:00Z (PDT)
+    rows, ev = one(undated_event("2026-08-31T06:30:00Z", date_only))
+    assert ev.public_sale_start is not None
+    rows, ev = one(undated_event("2026-08-31T07:00:01Z", date_only))
+    assert rows.onsale_nulled == {"after_event": 1}
