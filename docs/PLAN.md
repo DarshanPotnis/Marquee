@@ -187,10 +187,17 @@ CREATE TABLE check_results (
 **`migrations/002_raw_gzip_and_run_counters.sql`** (decided by measurement, decision 005):
 - `raw_responses.body` (jsonb) is replaced by `body_gzip` (bytea, `STORAGE EXTERNAL`), `body_sha256` and `body_bytes`.
 - `ingest_runs` gains `probe_calls`, `probe_events`, `undated_events` and `onsale_nulled` (jsonb counts by reason).
+- `ingest_runs` gains `range_start` and `range_end` (migration `004`): the instants the run covered, written when the run opens. Runs from before `004` were backfilled from `started_at` with the same rule as `plan_range`.
 
 `first_seen_run` / `last_seen_run` let you answer "when did this show appear?" and "which shows vanished?" without any extra tables. A show that goes TBA stays visible through the undated calls (§4), so it isn't mistaken for a vanished one.
 
 **Change detection** is a pure function (`changes.py`). It takes the stored row and the freshly transformed row, and returns one change per tracked field that differs. A first sighting is not a change; new shows come from `first_seen_run`.
+
+**New shows are judged against the previous good run's range.** Every LA midnight the 90-day window moves forward a day, so that day's shows are seen for the first time without having just been listed. A show first seen in run R is:
+- **newly listed** if its start was inside the range of the last succeeded run before R, or if it's undated;
+- **entered the 90-day window** if its start lay beyond that range's end. The dashboard shows these as a count, not as news.
+
+With no succeeded run before R, R was the baseline, and nothing in it is news.
 
 **Values as the API sends them (Phase 0, `docs/api-notes.md`):**
 - Status is spelled `cancelled`.
@@ -285,9 +292,16 @@ A run that didn't complete (`partial` or `failed`) skips the checks; it's alread
 1. `ingest` exits **non-zero for any bad run**: `partial` (budget or quota), `failed`, or an **error-level check failed**.
 2. The scheduled GitHub Actions run therefore **turns red**.
 3. GitHub notifies **the user who created the scheduled workflow**, or whoever later changed its cron or re-enabled it. Here that's the repo owner, who pushes it.
-4. The notification arrives **by email and/or on the web**, according to that user's GitHub Actions notification settings, which can be set to failed runs only. Phase 7 checks the setting.
+4. The notification arrives **by email and/or on the web**, according to that user's settings: **github.com/settings/notifications → System → Actions**. Choose **Email** (and/or **On GitHub**), then **Only notify for failed workflows**, then **Save**. Emails go to the account's default notifications email, set on the same page.
 
-(GitHub docs: "Notifications for scheduled workflows are sent to the user who initially created the workflow.") Warnings don't make the run red; they show on the dashboard. This path goes into the README in Phase 8.
+(GitHub docs: "Notifications for scheduled workflows are sent to the user who initially created the workflow. If a different user updates the cron syntax … subsequent notifications will be sent to that user instead." Re-enabling a disabled schedule also moves them to that user.) Warnings don't make the run red; they show on the dashboard. This path goes into the README in Phase 8.
+
+**The scheduler's limits (GitHub Actions), and how each shows up.**
+
+- **Delays.** GitHub says scheduled runs "can be delayed during periods of high loads", and that "high load times include the start of every hour". That's why the cron is minute 17. A late run shows as **LATE** on the dashboard (1.5 intervals), not as an error.
+- **Disabled after 60 days.** "In a public repository, scheduled workflows are automatically disabled when no repository activity has occurred in 60 days." Marquee's repository is public. **A disabled schedule is silent**: no run means no red run and no email, so the only signal is the dashboard going **STALE**. Any commit counts as activity, and the workflow can be re-enabled from the Actions tab.
+- **Never overlapping.** The workflow's concurrency group queues a new run behind one in progress and never cancels it; GitHub keeps at most one run waiting. The ingest advisory lock also guards against a manual run from a laptop.
+- **Public logs.** On a public repository anyone can read the run logs. They hold the run summary and failed-check details (today, two venue names), never a secret: GitHub masks secret values, and the app never logs the key.
 
 **Prune** runs at the end of every run:
 - It deletes the raw of **whole runs** that started more than `RAW_RETENTION_DAYS` ago.
@@ -392,7 +406,7 @@ Every phase starts with a plain-English plan and ends with its **done check run 
 | 3 | **Windows.** Brute force first: a single window, run for real, record what happens. Then adaptive splitting. | 1.5 h | Tests: windows cover the whole range with no gaps; splitting stops at 1 day; an over-cap day is reported. The real-run numbers are written in `STATUS.md`. |
 | 4 | **Raw, transform, change detection, load.** | 2 h | Tests: transform handles a missing venue, missing attractions, a TBA date, a missing time (`noSpecificTime`), lat/long as strings and the 1900 onsale placeholder; loading twice gives identical counts; `rebuild --verify` (into a throwaway schema, compared on natural keys and content) finds no differences. Change detection, a pure function with tests first, writes one `event_changes` row per changed field (status, local date, local time, venue, public sale start), none when nothing changed, and none on a first sighting. On-disk raw size per run is measured and the schedule is chosen (§4). |
 | 5 | **Checks, run record, prune.** | 1 h | Each check has a passing and a failing test. A real run shows its checks in `check_results`. |
-| 6 | **Dashboard.** | 1.5 h | Read-only connections (tested: writes fail). Scope label and the completeness proof ("N reported · N received · N missing") up top. LA times. No colour without a word. It shows the freshness badge, the last 24 runs (calls, reported vs fetched, status), the checks panel, an upcoming-events table with filters (date, venue, status), events per week, changes since the last day (new shows via `first_seen_run`; postponed, cancelled and rescheduled shows; date moves), one small panel of public onsales in the next 7 days (Phase 0: 6 such events; the 1900-01-01 placeholder reads as no date), and database size against the 1 GB limit. |
+| 6 | **Dashboard.** | 1.5 h | Read-only connections (tested: writes fail). Scope label and the completeness proof ("N reported · N received · N missing") up top. LA times. No colour without a word. It shows the freshness badge, the last 24 runs (calls, reported vs fetched, status), the checks panel, an upcoming-events table with filters (date, venue, status), events per week, changes since the last day (new shows via `first_seen_run`, newly listed apart from those that only entered the window, §3; postponed, cancelled and rescheduled shows; date moves), one small panel of public onsales in the next 7 days (Phase 0: 6 such events; the 1900-01-01 placeholder reads as no date), and database size against the 1 GB limit. |
 | 7 | **Schedule.** `ingest.yml` runs at minute 17 on the schedule the §4 budgets allow (hourly if both fit), with secrets `TM_API_KEY` and `MARQUEE_DATABASE_URL` (Neon). | 45 min | Two scheduled runs have succeeded and appear on the dashboard, and measured calls and storage per run match the budget. |
 | 8 | **Docs and rehearsal.** README, decision records, `STATUS.md`. | 1 h | A fresh clone, following only the README, reaches a working dashboard. The demo is rehearsed twice. |
 

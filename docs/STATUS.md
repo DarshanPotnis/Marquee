@@ -4,6 +4,37 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Dashboard fixes: newly listed vs entered the window, plain-English check details
+
+### What changed
+
+- **New shows are split in two.** "Newly listed" means first seen, and either undated or dated inside the range of the last succeeded run before the one that first saw it. "Entered the 90-day window" means first seen only because the window moved forward a day; those appear as a one-line count.
+- **Migration `004`:** each run stores `range_start` and `range_end` when it opens. Runs 1–4 were backfilled from `started_at` with the same rule as `plan_range`. Every run on production now ends its range at 2027-01-04 08:00 UTC (LA midnight).
+- **Check details read as sentences.** From run 5:
+  - "All 13 windows returned every event they reported"
+  - "1,290 received, exactly the API's total for the range"
+  - "1,309 events vs a typical 1,304 (alert at 912 or fewer)"
+  - "No window over the API's 1,000-event cap"
+  - "All 1,309 events have a venue"
+  - "2 venues outside California: Studio Theatre (Perth, ON); The Olaus Ice Palace (Rossland, BC)"
+  - "243 events use Ticketmaster's 1900 placeholder date (expected)"
+- **"Alert at 912 or fewer", not "below 912".** The floor is 70% of the typical count: 912.1 for a typical 1,303. A run of exactly 912 alerts, so "below 912" would be one event off. The detail names the largest count that alerts.
+
+### Tests
+
+- **390 pass**; ruff and mypy strict are clean.
+- **Breakage test:** each change below made its tests fail.
+  - The range's end counted as outside: 1 fails.
+  - A date-only show judged a day late: 1 fails.
+  - A show compared with its own run's range instead of the previous one: 3 fail.
+  - The backfill using the UTC date instead of the LA date: 1 fails.
+
+### Surprise
+
+**Ticketmaster renamed a show and sent a literal "?" for its apostrophe.** In runs 3–4 the raw name was "The Vigodas"; in run 5 it is "Conan O?Brien and The Vigodas". The "?" is in the bytes as received, so it's not an encoding bug on our side. It affects **1 of 1,309** listed names. Name changes aren't tracked as changes (the tracked fields are status, date, time, venue and onsale), so the dashboard simply shows the new name.
+
+---
+
 ## 2026-10-06: Phase 6, dashboard review
 
 ### What changed
