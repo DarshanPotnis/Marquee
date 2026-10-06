@@ -72,7 +72,7 @@ def _without_password(text: str, url: str) -> str:
     try:
         password = urlsplit(url).password
     except ValueError:  # unparseable URL: hide the whole thing rather than guess
-        return text.replace(url, "<DATABASE_URL>")
+        return text.replace(url, "<MARQUEE_DATABASE_URL>")
     for secret in {password, unquote(password)} if password else set():
         text = text.replace(secret, "***")
     return text

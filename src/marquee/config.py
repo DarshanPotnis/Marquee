@@ -26,12 +26,13 @@ class Settings:
 
 
 def load_settings(env: Mapping[str, str]) -> Settings:
-    database_url = _text(env, "DATABASE_URL")
+    # Only the MARQUEE_ name: other projects on the same machine export a generic DATABASE_URL.
+    database_url = _text(env, "MARQUEE_DATABASE_URL")
     if database_url is None:
-        raise ConfigError("DATABASE_URL is not set")
+        raise ConfigError("MARQUEE_DATABASE_URL is not set")
     if not database_url.startswith(("postgresql://", "postgres://")):
         # Never echo the value: it may hold a password.
-        raise ConfigError("DATABASE_URL must be a postgresql:// or postgres:// URL")
+        raise ConfigError("MARQUEE_DATABASE_URL must be a postgresql:// or postgres:// URL")
     return Settings(
         database_url=database_url,
         tm_api_key=_text(env, "TM_API_KEY"),
@@ -44,7 +45,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     )
 
 
-SETTING_NAMES = ("DATABASE_URL", "TM_API_KEY", "RAW_RETENTION_DAYS", "SCHEDULE_INTERVAL_MINUTES")
+SETTING_NAMES = (
+    "MARQUEE_DATABASE_URL", "TM_API_KEY", "RAW_RETENTION_DAYS", "SCHEDULE_INTERVAL_MINUTES"
+)
 
 
 def settings_from_environment(dotenv_path: Path | None = None) -> Settings:
@@ -56,8 +59,8 @@ def read_environment(
 ) -> dict[str, str]:
     """Merge .env with the process environment, refusing to guess when they disagree.
 
-    A variable exported by a shell profile (say, another project's DATABASE_URL) would otherwise
-    silently decide which database we touch. CI has no .env, so its secrets apply unopposed.
+    A variable exported by a shell profile would otherwise silently decide which database we
+    touch. CI has no .env, so its secrets apply unopposed.
     Blank .env values count as unset. With `names`, only those variables are checked and returned.
     """
     path = dotenv_path or Path.cwd() / ".env"
