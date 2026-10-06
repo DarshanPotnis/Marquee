@@ -1,6 +1,7 @@
 """The read-only `brute-force` and `fetch-windows` commands, against the fake Discovery API."""
 
 import logging
+import re
 from datetime import UTC, date, datetime
 
 import pytest
@@ -74,3 +75,26 @@ def test_fetch_windows_exits_1_when_unique_ids_fall_short(
         assert cli.main(["fetch-windows", "--start", START]) == 1
     assert "unique == reported: NO (1200 of 1300)" in caplog.text
     assert "over-cap days: 2026-11-01 (1300 reported, stopped by DIS1035 at page 6)" in caplog.text
+
+
+def test_fetch_windows_accepts_a_split_threshold(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    use(monkeypatch, FakeDiscovery(spread(2000, WHOLE.start, WHOLE.end)))
+    with caplog.at_level(logging.INFO):
+        assert cli.main(["fetch-windows", "--start", START, "--split-threshold", "100"]) == 0
+    assert "split threshold 100" in caplog.text
+    splits = re.search(r"final windows, (\d+) split", caplog.text)
+    assert splits is not None and int(splits.group(1)) > 0
+    assert "unique == reported: yes" in caplog.text
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "ten"])
+def test_the_split_threshold_must_be_a_positive_whole_number(
+    bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["fetch-windows", "--split-threshold", bad])
+    err = capsys.readouterr().err
+    assert "--split-threshold" in err
+    assert "positive whole number" in err

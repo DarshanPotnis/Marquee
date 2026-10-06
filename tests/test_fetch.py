@@ -143,3 +143,15 @@ def test_both_one_thirty_a_m_on_fall_back_night_are_fetched() -> None:
 def test_empty_windows_cost_one_call_each() -> None:
     r = fetch_range(client_for(FakeDiscovery([])), BASE_QUERY, WINDOWS)
     assert (r.calls, r.reported, r.fetched, len(r.unique_ids)) == (13, 0, 0, 0)
+
+
+def test_a_lower_split_threshold_splits_ordinary_weeks() -> None:
+    api = FakeDiscovery(spread(2000, WHOLE.start, WHOLE.end))  # about 155 a week, 22 a day
+    r = fetch_range(client_for(api), BASE_QUERY, WINDOWS, split_threshold=100)
+    assert r.splits > 0
+    assert all(w.reported <= 100 for w in r.final)
+    assert len(r.unique_ids) == 2000
+    assert r.reported == r.fetched
+    assert r.over_cap == []  # over_cap is about the API's paging cap, not the split threshold
+    assert r.calls == len(api.requests)
+    assert_covers_the_range(r)
