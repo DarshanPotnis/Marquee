@@ -345,9 +345,10 @@ marquee/
 ├── README.md
 ├── CLAUDE.md
 ├── pyproject.toml            # deps, ruff, mypy and pytest config (uv; uv.lock committed)
-├── docker-compose.yml        # local Postgres 18 for tests (same major version as Neon)
+├── docker-compose.yml        # local Postgres 18: marquee (a local run) and marquee_test (tests)
+├── docker/initdb/            # creates the marquee database on a fresh container
 ├── .env.example              # TM_API_KEY, MARQUEE_DATABASE_URL, MARQUEE_TEST_DATABASE_URL, settings
-├── migrations/001_init.sql
+├── migrations/               # 001_init.sql … 004_run_range.sql, applied in order, checksummed
 ├── src/marquee/
 │   ├── __main__.py           # CLI: migrate | brute-force | fetch-windows | ingest | rebuild [--verify] | checks | prune
 │   ├── config.py             # settings from environment
@@ -370,16 +371,17 @@ marquee/
 │   ├── api-notes.md          # what we actually observed from the API
 │   ├── STATUS.md             # status notes, newest first
 │   └── decisions/001-…md     # decision records
+├── scripts/demo_seed.py      # SYNTHETIC data for the README screenshots (local databases only)
 ├── tests/
 │   ├── fixtures/             # SYNTHETIC, shaped like real responses
 │   └── test_*.py
 ├── local/                    # gitignored: real sample responses
 └── .github/workflows/
     ├── ci.yml                # ruff + mypy --strict + pytest (Postgres 18 service container)
-    └── ingest.yml            # hourly scheduled ingest
+    └── ingest.yml            # hourly at minute 17, plus manual dispatch
 ```
 
-**Dependencies:** `httpx`, `psycopg[binary]`, `python-dotenv`, `streamlit`, plus dev-only `pytest`, `ruff` and `mypy` (strict, on `src/marquee`). Build backend `uv_build`. CI actions are pinned to the commit of a specific release. Nothing else without a reason.
+**Dependencies:** `httpx`, `psycopg[binary]`, `python-dotenv`, `streamlit`, plus dev-only `pytest`, `ruff` and `mypy` (strict, on `src/marquee` and `dashboard`). Build backend `uv_build`. CI actions are pinned to the commit of a specific release. Nothing else without a reason.
 
 ---
 
@@ -426,6 +428,7 @@ One page each: the problem, the options, the choice, why, and what would change 
 2. **002: Our own IDs plus (source, source_id).** Ready for a second marketplace.
 3. **003: Boring stack.** A scheduler, Postgres and Streamlit, with written upgrade triggers: add an orchestrator when jobs depend on each other, partition by month when `event_changes` or raw queries pass a few seconds, move to a warehouse when Postgres strains.
 4. **004: Adaptive window splitting** for the paging cap.
+5. **005: Raw storage** as gzip of the exact bytes (added in Phase 4, from measurement).
 
 ---
 
