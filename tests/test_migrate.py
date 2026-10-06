@@ -22,6 +22,9 @@ EXPECTED_TABLES = {
 }
 
 
+MIGRATIONS = ("001_init.sql", "002_raw_gzip_and_run_counters.sql")
+
+
 def tables(conn: psycopg.Connection) -> set[str]:
     rows = conn.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()"
@@ -46,7 +49,7 @@ def use_test_schema(schema: Schema, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_fresh_migrate_creates_every_table(schema: Schema) -> None:
     with schema.connect() as conn:
         result = migrate(conn)
-        assert result.applied == ("001_init.sql",)
+        assert result.applied == MIGRATIONS
         assert result.already_applied == 0
         assert tables(conn) == EXPECTED_TABLES
 
@@ -57,7 +60,7 @@ def test_second_run_applies_nothing(schema: Schema) -> None:
         before = tables(conn)
         again = migrate(conn)
         assert again.applied == ()
-        assert again.already_applied == 1
+        assert again.already_applied == len(MIGRATIONS)
         assert tables(conn) == before
 
 
@@ -117,8 +120,8 @@ def test_cli_migrate_runs_twice_cleanly(
     with caplog.at_level(logging.INFO):
         assert main(["migrate"]) == 0
         assert main(["migrate"]) == 0
-    assert "applied 1 (001_init.sql), already applied 0" in caplog.text
-    assert "applied 0, already applied 1" in caplog.text
+    assert f"applied 2 ({', '.join(MIGRATIONS)}), already applied 0" in caplog.text
+    assert "applied 0, already applied 2" in caplog.text
 
 
 def test_cli_exits_with_a_clear_message_while_the_lock_is_held(
@@ -131,3 +134,37 @@ def test_cli_exits_with_a_clear_message_while_the_lock_is_held(
     assert "nothing was changed" in caplog.text.lower()
     with schema.connect() as conn:
         assert tables(conn) == set()
+
+
+def columns(conn: psycopg.Connection, table: str) -> dict[str, str]:
+    rows = conn.execute(
+        "SELECT column_name, data_type FROM information_schema.columns"
+        " WHERE table_schema = current_schema() AND table_name = %s", (table,)
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def test_002_stores_raw_as_exact_gzip_bytes(schema: Schema) -> None:
+    # Decided by measurement (decision 005): gzip bytea was 1.84 MB a run against 6.32 MB as
+    # jsonb, and the only byte-exact option.
+    with schema.connect() as conn:
+        migrate(conn)
+        cols = columns(conn, "raw_responses")
+        assert "body" not in cols
+        assert (cols["body_gzip"], cols["body_sha256"], cols["body_bytes"]) == \
+            ("bytea", "text", "integer")
+        storage = conn.execute(
+            "SELECT attstorage FROM pg_attribute"
+            " WHERE attrelid = 'raw_responses'::regclass AND attname = 'body_gzip'"
+        ).fetchone()
+        assert storage == ("e",)  # EXTERNAL: already compressed, so don't compress again
+
+
+def test_002_adds_the_run_counters(schema: Schema) -> None:
+    with schema.connect() as conn:
+        migrate(conn)
+        cols = columns(conn, "ingest_runs")
+        assert {c: cols[c] for c in ("probe_calls", "probe_events", "undated_events",
+                                      "onsale_nulled")} == \
+            {"probe_calls": "integer", "probe_events": "integer", "undated_events": "integer",
+             "onsale_nulled": "jsonb"}
