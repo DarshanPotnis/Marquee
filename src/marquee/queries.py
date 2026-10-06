@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 
 from marquee import db
 from marquee.db import Connection
@@ -97,6 +97,10 @@ class Storage:
     database_bytes: int
     limit_bytes: int | None  # Neon's neon.max_cluster_size; None elsewhere
     tables: tuple[tuple[str, int], ...]  # largest first
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)  # the dashboard's clock; a seam for tests
 
 
 def connect_readonly(url: str) -> Connection:
