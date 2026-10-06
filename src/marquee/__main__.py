@@ -12,6 +12,7 @@ from marquee import db
 from marquee.config import ConfigError, Settings, settings_from_environment
 from marquee.fetch import BASE_QUERY, CAP, PAGE_SIZE, fetch_range, fetch_window
 from marquee.ingest import ingest
+from marquee.rebuild import RebuildError, rebuild, verify
 from marquee.tm_client import TicketmasterClient, TicketmasterError
 from marquee.windows import API_TIME_FORMAT, api_time, plan_range, plan_windows
 
@@ -35,6 +36,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.add_parser(
         "ingest", help="fetch every window plus undated events; save raw; load the clean tables"
     )
+    rebuild_cmd = commands.add_parser(
+        "rebuild", help="replay retained raw onto the clean tables; 0 API calls"
+    )
+    rebuild_cmd.add_argument(
+        "--verify", action="store_true",
+        help="rebuild into a throwaway schema and compare with the live tables; changes nothing",
+    )
     for command in (brute, windowed):
         # Pass the same --start to both, back to back, for a like-for-like comparison.
         command.add_argument(
@@ -55,6 +63,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_brute_force(settings, args.start)
     if args.command == "ingest":
         return run_ingest(settings)
+    if args.command == "rebuild":
+        return run_rebuild(settings, verify_only=args.verify)
     if args.command == "fetch-windows":
         return run_fetch_windows(settings, args.start, args.split_threshold)
     parser.error(f"unknown command {args.command!r}")
@@ -105,6 +115,30 @@ def run_ingest(settings: Settings) -> int:
         f"; error: {s.error}" if s.error else "",
     )
     return 1 if s.status == "failed" else 0
+
+
+def run_rebuild(settings: Settings, *, verify_only: bool) -> int:
+    """Zero API calls: no client is ever created here."""
+    try:
+        with db.connect(settings.database_url) as conn:
+            if not verify_only:
+                r = rebuild(conn)
+                log.info("rebuild: replayed %d raw pages from %d runs onto the live tables; "
+                         "event_changes untouched; 0 API calls", r.raw_pages, r.runs)
+                return 0
+            v = verify(conn)
+    except RebuildError as exc:
+        log.error("rebuild: %s", exc)
+        return 1
+    for d in v.diffs:
+        log.log(logging.INFO if d.only_live == d.only_rebuilt == 0 else logging.ERROR,
+                "rebuild --verify: %s: %d only live, %d only rebuilt%s", d.table, d.only_live,
+                d.only_rebuilt, f" (e.g. {', '.join(d.samples)})" if d.samples else "")
+    log.log(logging.INFO if v.ok else logging.ERROR,
+            "rebuild --verify: replayed %d raw pages from %d runs into a throwaway schema; "
+            "differences: %s; live tables unchanged; 0 API calls", v.raw_pages, v.runs,
+            "none" if v.ok else "see above")
+    return 0 if v.ok else 1
 
 
 def run_brute_force(settings: Settings, start: datetime | None) -> int:
