@@ -278,3 +278,18 @@ def test_sizes_under_a_tenth_of_a_megabyte(size: int, text: str) -> None:
 def test_shows_that_only_entered_the_window_are_a_count(dates: list[date], text: str) -> None:
     from marquee.present import entered_caption
     assert entered_caption(dates, TODAY) == text
+
+
+@pytest.mark.parametrize(
+    ("status", "checks_failed", "error", "word"),
+    [("succeeded", 0, None, "succeeded"),
+     ("succeeded", None, None, "succeeded"),  # runs from before Phase 5 had no checks
+     ("succeeded", 2, None, "succeeded · CHECKS FAILED"),
+     ("failed", None, "abandoned: still running 30 minutes after it started", "FAILED (abandoned)"),
+     ("failed", None, "TicketmasterError: HTTP 500", "FAILED"),
+     ("partial", None, "daily quota", "PARTIAL")],
+)
+def test_a_runs_status_says_when_its_checks_failed_or_it_was_abandoned(
+    status: str, checks_failed: int | None, error: str | None, word: str
+) -> None:
+    assert run_status_word(status, checks_failed, error) == word

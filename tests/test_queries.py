@@ -217,3 +217,14 @@ def test_new_shows_say_whether_they_were_newly_listed_or_only_entered_the_window
         shows = queries.new_shows(conn, datetime.now(UTC) - timedelta(days=1))
     assert sorted((s.show, s.entered) for s in shows) == [
         ("Synthetic evtFRESH", False), ("Synthetic evtJAN4", True), ("Synthetic tbaFRESH", False)]
+
+
+def test_a_run_whose_error_checks_failed_is_not_the_last_good_run(loaded: Schema) -> None:
+    # Fetch status keeps its meaning (run 2 still "succeeded"); "good" also needs its checks.
+    with loaded.connect() as conn:
+        first = conn.execute("SELECT finished_at FROM ingest_runs WHERE run_id = 1").fetchone()
+        conn.execute("UPDATE ingest_runs SET checks_failed = 1 WHERE run_id = 2")
+    with readonly(loaded) as conn:
+        assert first is not None and queries.last_success_at(conn) == first[0]
+        rows, _ = queries.upcoming_events(conn, TODAY, TODAY + timedelta(days=97))
+    assert "Synthetic evtGONE" in {r.show for r in rows}  # listed as of run 1, the last good run

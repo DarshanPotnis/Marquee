@@ -5,6 +5,7 @@ Uses MARQUEE_TEST_DATABASE_URL and skips cleanly without it.
 
 import gzip
 import hashlib
+import json
 import logging
 from datetime import UTC, date, datetime
 
@@ -253,7 +254,7 @@ def test_the_ingest_command_exits_quietly_when_another_run_holds_the_lock(
     with direct_connect(migrated.url) as holder, caplog.at_level(logging.INFO):
         holder.execute("SELECT pg_advisory_lock(%s)", (INGEST_LOCK.key,))
         assert cli.main(["ingest"]) == 0
-    assert "another ingest is running" in caplog.text
+    assert "another ingest or a rebuild is running" in caplog.text
 
 
 # --- Checks (PLAN §5) ----------------------------------------------------------------------------
@@ -382,3 +383,54 @@ def test_a_run_records_the_range_it_covered_from_the_moment_it_opens(migrated: S
     assert query(migrated, "SELECT status, range_start, range_end FROM ingest_runs"
                            " ORDER BY run_id") == [("succeeded", WHOLE.start, WHOLE.end),
                                                    ("failed", WHOLE.start, WHOLE.end)]
+
+
+# --- Fixes from the independent review ---------------------------------------------------------
+
+def test_runs_whose_error_checks_failed_dont_count_toward_the_volume_baseline(
+    migrated: Schema,
+) -> None:
+    # Four bad runs in a row must not make a drop the new normal.
+    with migrated.connect() as conn:
+        for unique, failed in [(1000, 0)] * 3 + [(300, 1)] * 4:
+            conn.execute("INSERT INTO ingest_runs (source, status, unique_events, checks_failed)"
+                         " VALUES ('ticketmaster', 'succeeded', %s, %s)", (unique, failed))
+    s = run(migrated, FakeDiscovery(spread(300, WHOLE.start, WHOLE.end)))
+    assert s is not None
+    assert check_rows(migrated, s.run_id)["volume_vs_baseline"][:2] == (False, "error")
+
+
+def test_a_page_the_database_refuses_keeps_its_raw_and_fails_the_run(migrated: Schema) -> None:
+    events = spread(60, WHOLE.start, WHOLE.end)
+    bad = FakeEvent("evt\x00BAD", events[30].starts_at)  # PostgreSQL text can't hold NUL
+    api = FakeDiscovery([*events, bad])
+    s = run(migrated, api)
+    assert s is not None and s.status == "failed"
+    assert s.error is not None and "refused" in s.error
+    # Every page's raw is kept, the refused one included (the size=1 total is never raw).
+    bodies = [gzip.decompress(b) for (b,) in query(migrated, "SELECT body_gzip FROM raw_responses")]
+    assert len(bodies) == len(api.sent) - 1
+    refused = [b for b in bodies if b"evt\\u0000BAD" in b]
+    assert len(refused) == 1
+    on_page = {e["id"] for e in json.loads(refused[0])["_embedded"]["events"]}
+    loaded = {r[0] for r in query(migrated, "SELECT source_id FROM events")}
+    assert loaded == {e.id for e in events} - on_page  # the other pages still loaded
+    assert query(migrated, "SELECT status FROM ingest_runs") == [("failed",)]
+
+
+def test_runs_left_running_past_the_workflow_timeout_are_closed_as_abandoned(
+    migrated: Schema,
+) -> None:
+    with migrated.connect() as conn:
+        stale, recent = (
+            conn.execute("INSERT INTO ingest_runs (source, started_at) VALUES ('ticketmaster',"
+                         " now() - make_interval(mins => %s)) RETURNING run_id", (m,)).fetchone()
+            for m in (30, 2))
+    run(migrated, FakeDiscovery(spread(20, WHOLE.start, WHOLE.end)))
+    rows = {r[0]: r[1:] for r in query(
+        migrated, "SELECT run_id, status, error, finished_at IS NOT NULL FROM ingest_runs")}
+    assert stale is not None and recent is not None
+    status, error, finished = rows[stale[0]]
+    assert (status, finished) == ("failed", True)
+    assert isinstance(error, str) and error.startswith("abandoned:")
+    assert rows[recent[0]] == ("running", None, False)  # inside the 10-minute timeout: left alone

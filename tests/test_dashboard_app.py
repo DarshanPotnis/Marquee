@@ -262,3 +262,18 @@ def test_shows_that_only_entered_the_window_are_counted_apart_from_newly_listed_
     assert list(table_with(at, "First seen")["Show"]) == ["Synthetic evtFRESH"]
     assert ("Entered the 90-day window: 1 show (Mon Jan 4, 2027), in range only because the "
             "window moved forward.") in text(at)
+
+
+def test_the_runs_table_names_failed_checks_and_abandoned_runs(
+    migrated: Schema, render: Callable[[Schema], AppTest]
+) -> None:
+    api = FakeDiscovery(spread(300, WHOLE.start, WHOLE.end))
+    ingest_with(migrated, api)  # run 1: good
+    with migrated.connect() as conn:  # run 2: killed mid-way, left "running"
+        conn.execute("INSERT INTO ingest_runs (source, started_at)"
+                     " VALUES ('ticketmaster', now() - interval '30 minutes')")
+    api.over_report = 5
+    ingest_with(migrated, api)  # run 3: closes run 2, then fetches fine but a check fails
+    at = render(migrated)
+    assert list(table_with(at, "Undated")["Status"]) == [
+        "succeeded · CHECKS FAILED", "FAILED (abandoned)", "succeeded"]

@@ -110,3 +110,21 @@ def test_the_prune_command_dry_run_reports_and_keeps_everything(
         assert cli.main(["prune", "--dry-run"]) == 0
     assert "would delete 15 raw responses from 1 run" in caplog.text
     assert len(raw_runs(migrated)) == 2
+
+
+def test_the_kept_run_is_capped_at_14_days_so_retention_never_becomes_indefinite(
+    migrated: Schema,
+) -> None:
+    (old,) = runs_aged(migrated, 15)
+    with migrated.connect() as conn:
+        r = prune(conn, retention_days=3)
+    assert (r.runs, r.kept_run) == ((old,), None)
+    assert raw_runs(migrated) == []
+
+
+def test_a_run_whose_error_checks_failed_is_not_the_one_kept(migrated: Schema) -> None:
+    good, bad = runs_aged(migrated, 6, 5)
+    with migrated.connect() as conn:
+        conn.execute("UPDATE ingest_runs SET checks_failed = 1 WHERE run_id = %s", (bad,))
+        r = prune(conn, retention_days=3)
+    assert (r.runs, r.kept_run) == ((bad,), good)

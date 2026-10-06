@@ -11,9 +11,10 @@ from conftest import Schema
 from fake_discovery import FakeDiscovery, FakeEvent, client_for, spread, undated
 
 import marquee.__main__ as cli
+import marquee.rebuild as rebuild_module
 from marquee import db
 from marquee.config import load_settings
-from marquee.db import migrate
+from marquee.db import INGEST_LOCK, LockHeld, migrate
 from marquee.ingest import ingest
 from marquee.rebuild import RebuildError, rebuild, verify
 from marquee.windows import plan_range
@@ -55,6 +56,10 @@ def snapshot(schema: Schema) -> dict[str, object]:
 
 def diffs(v: object) -> dict[str, tuple[int, int]]:
     return {d.table: (d.only_live, d.only_rebuilt) for d in v.diffs}  # type: ignore[attr-defined]
+
+
+def pruned(v: object) -> dict[str, int]:
+    return {d.table: d.pruned for d in v.diffs}  # type: ignore[attr-defined]
 
 
 # --- --verify: rebuild into a throwaway schema and compare ----------------------------------------
@@ -128,8 +133,26 @@ def test_after_pruning_rows_without_raw_are_left_alone_and_verify_says_so(
         rows = dict(conn.execute("SELECT source_id, first_seen_run FROM events").fetchall())
         assert rows == {"evtGONE": first.run_id, "evtKEPT": first.run_id}  # left alone, not moved
         v = verify(conn)
-    # The rebuilt copy has no evtGONE, and sees evtKEPT first in the second run.
-    assert diffs(v)["events"] == (2, 1)
+    # Only what retained raw can reproduce is compared. evtGONE (last seen in the pruned run) and
+    # its attraction, and evtKEPT's first_seen_run, are reported as not reproducible, not failed.
+    assert v.ok and diffs(v)["events"] == (0, 0)
+    assert pruned(v) == {"venues": 0, "attractions": 1, "events": 1, "event_attractions": 1}
+    assert v.first_seen_pruned == 1
+
+
+def test_after_pruning_verify_still_catches_a_real_difference(migrated: Schema) -> None:
+    gone = FakeEvent("evtGONE", datetime(2026, 11, 20, 4, tzinfo=UTC))
+    kept = FakeEvent("evtKEPT", datetime(2026, 11, 21, 4, tzinfo=UTC))
+    api = FakeDiscovery([gone, kept])
+    with migrated.connect() as conn:
+        first = ingest(conn, client_for(api), now=NOW)
+        api.events = [kept]
+        ingest(conn, client_for(api), now=NOW)
+        assert first is not None
+        conn.execute("DELETE FROM raw_responses WHERE run_id = %s", (first.run_id,))
+        conn.execute("UPDATE events SET status = 'bogus' WHERE source_id = 'evtKEPT'")
+        v = verify(conn)
+    assert not v.ok and diffs(v)["events"] == (1, 1)
 
 
 def test_a_corrupted_raw_body_stops_the_rebuild_and_changes_nothing(migrated: Schema) -> None:
@@ -168,7 +191,7 @@ def test_rebuild_verify_command_reports_and_exits_by_result(
         with migrated.connect() as conn:
             conn.execute("UPDATE events SET status = 'bogus' WHERE source_id = 'evt00003'")
         assert cli.main(["rebuild", "--verify"]) == 1
-        assert "events: 1 only live, 1 only rebuilt" in caplog.text
+        assert "events: 1 only live, 1 only rebuilt, 0 not reproducible (pruned)" in caplog.text
 
 
 def test_rebuild_command_replays_onto_the_live_tables(
@@ -179,3 +202,41 @@ def test_rebuild_command_replays_onto_the_live_tables(
     with caplog.at_level(logging.INFO):
         assert cli.main(["rebuild"]) == 0
     assert "replayed 30 raw pages from 2 runs onto the live tables" in caplog.text
+
+
+# --- rebuild and ingest never overlap -------------------------------------------------------------
+
+def test_rebuild_and_verify_refuse_while_an_ingest_holds_the_lock(
+    migrated: Schema, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    ingest_twice(migrated, FakeDiscovery(spread(20, WHOLE.start, WHOLE.end)))
+    with migrated.connect() as holder:
+        holder.execute("SELECT pg_advisory_lock(%s)", (INGEST_LOCK.key,))
+        with migrated.connect() as conn:
+            with pytest.raises(LockHeld, match=r"marquee\.ingest"):
+                rebuild(conn)
+            with pytest.raises(LockHeld, match=r"marquee\.ingest"):
+                verify(conn)
+        use(monkeypatch, migrated)
+        with caplog.at_level(logging.INFO):
+            assert cli.main(["rebuild"]) == 1
+        assert "an ingest is running" in caplog.text
+
+
+def test_ingest_stands_aside_while_a_rebuild_holds_the_lock(
+    migrated: Schema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeDiscovery(spread(20, WHOLE.start, WHOLE.end))
+    ingest_twice(migrated, api)
+    attempts: list[object] = []
+    replay = rebuild_module._replay
+
+    def replay_while_an_ingest_tries(conn: object, schema: str) -> object:
+        with migrated.connect() as other:
+            attempts.append(ingest(other, client_for(api), now=NOW))
+        return replay(conn, schema)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(rebuild_module, "_replay", replay_while_an_ingest_tries)
+    with migrated.connect() as conn:
+        rebuild(conn)
+    assert attempts == [None]  # the ingest saw the lock and did nothing
