@@ -18,12 +18,13 @@ Option 3 comes with a separate check, `rebuild --verify`, which rebuilds into a 
 
 ## Choice
 
-- **Every page goes to raw first**, as gzip of the exact bytes (decision 005). The transform reads only raw.
-- **`rebuild`** replays retained raw in run order (run, then raw ID) onto the live tables, in one transaction, with **zero API calls**.
+- **Every page goes to raw first**, as gzip of the exact bytes (decision 005), committed on its own before the page is loaded. So a page the database refuses still keeps its raw. The transform reads only raw.
+- **`rebuild`** replays retained raw in run order (run, then raw ID) onto the live tables, in one transaction, with **zero API calls**. It holds the ingest lock, so a scheduled run can't write between replayed pages.
   - It uses each run's own start time, so time-dependent rules (the onsale plausibility check) replay exactly.
   - It is the repair tool after a transform fix.
 - **`rebuild --verify`** rebuilds into a throwaway schema and compares with the live tables.
   - It matches on `(source, source_id)` and content columns, never our surrogate IDs or `updated_at`.
+  - It compares only what retained raw can reproduce. The rest is reported as "not reproducible (pruned)", not as a difference (see the table below).
   - It reports differences, drops the scratch schema, and changes nothing live.
   - This is the real proof. Replaying onto tables that already hold the same data would come out identical almost by construction, which proves very little.
 - **`event_changes` is append-only history,** and rebuild never touches it.
@@ -37,12 +38,12 @@ Once raw has been pruned:
 | | Can rebuild reproduce it? | What happens |
 |---|---|---|
 | Events seen in retained raw | Yes, every field | Refreshed from raw |
-| Events last seen before the oldest retained raw | No: no raw left | Left as they are, not deleted. `--verify` reports them as only-live. |
-| `first_seen_run` of events first seen before the oldest retained raw | No | Kept as stored. Rebuild never moves it. `--verify` reports the difference. |
+| Events last seen before the oldest retained raw | No: no raw left | Left as they are, not deleted. `--verify` counts them as not reproducible (pruned), with their venues, attractions and links. |
+| `first_seen_run` of events first seen before the oldest retained raw | No | Kept as stored. Rebuild never moves it. `--verify` skips that column for them and counts them as not reproducible. |
 | `event_changes` older than retention | No | Never regenerated, never deleted. It is the only record of that history. |
 | `event_changes` within retention | Could be, but isn't | Replaying would re-detect changes already recorded, so change detection is off during rebuild. |
 
-A test proves the pruning case: after deleting a run's raw, rebuild leaves the vanished event and its `first_seen_run` alone, and `--verify` reports both differences.
+Tests prove the pruning case. After deleting a run's raw, rebuild leaves the vanished event and its `first_seen_run` alone; `--verify` passes and counts both as not reproducible; and a real difference in a reproducible row still fails it.
 
 ## Used for real
 

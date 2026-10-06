@@ -17,8 +17,8 @@ Real numbers from production on 2026-10-06, Ticketmaster's LA market (DMA 324), 
 | **Raw storage per run** | **1.84 MB** as gzip of the exact bytes, against **6.32 MB** as `jsonb`, which isn't even byte-exact |
 | **One run** | 16 API calls (13 windows, 1 whole-range total, 2 undated calls), about 20 s |
 | **A day, hourly** | 384 calls (budget 2,500; quota 5,000) and about 131 MB of raw kept at 3-day retention (budget 500 MB of Neon's free 1 GB) |
-| **Rebuild from raw** | 0 API calls; `rebuild --verify` found 0 differences while all raw was still retained (see Known issues) |
-| **Tests** | 390: unit tests, plus integration tests against Postgres 18, plus the Streamlit app run headless |
+| **Rebuild from raw** | 0 API calls; `rebuild --verify` found 0 differences. After pruning, it compares what retained raw can reproduce and reports the rest as not reproducible |
+| **Tests** | 406: unit tests, plus integration tests against Postgres 18, plus the Streamlit app run headless |
 | **Checks** | 7 after every run: 4 can fail the run, 3 are warnings |
 | **Scheduled runs on GitHub Actions** | run 6: _pending_ · run 7: _pending_ |
 
@@ -70,9 +70,9 @@ flowchart TB
 
 **One run, step by step:**
 1. Take a Postgres advisory lock.
-2. Open an `ingest_runs` row, recording the range it covers.
+2. Close any run left `running` past the 10-minute workflow timeout, as **FAILED (abandoned)**. Then open an `ingest_runs` row, recording the range it covers.
 3. Plan weekly windows in Los Angeles days. Halve any window whose first page reports more than 1,000 events.
-4. Fetch every page, then make two calls for undated (TBA/TBD) events. **Each page is one transaction:** save the raw bytes, transform them, record field changes, upsert. A run that stops halfway is safe to re-run.
+4. Fetch every page, then make two calls for undated (TBA/TBD) events. **Each page's raw is committed first, on its own.** Then one transaction transforms it, records field changes and upserts. A run that stops halfway is safe to re-run, and a page the database refuses keeps its raw.
 5. Run the checks.
 6. Prune old raw.
 7. Close the run as `succeeded`, `partial` or `failed`.
@@ -93,12 +93,14 @@ The details are in [docs/PLAN.md](docs/PLAN.md).
 
 They run after every complete run. Two counts may differ by up to max(2 events, 1%), because the API's totals drift by a few events an hour.
 
+A **good run** is one whose fetch succeeded and whose error-level checks all passed. Only good runs count for freshness, for which events are listed, for the volume baseline, and for the raw that prune keeps. A run that fetched everything but failed a check shows as **succeeded · CHECKS FAILED**.
+
 | Check | If it fails | What it catches |
 |---|---|---|
 | Every page fully fetched (`fetched_vs_reported`) | Run fails | Each window returned the events it reported: paging bugs, dropped pages |
 | Nothing missing vs the API's total (`unique_vs_total`) | Run fails | Unique IDs across all windows equal the API's total for the whole range: gaps between windows |
 | No window over the API cap (`window_over_cap`) | Run fails | A day with more than 1,000 events, which we know we couldn't fetch |
-| Volume normal vs recent runs (`volume_vs_baseline`) | Run fails | Fewer than 70% of the typical count (the median of the last 7 succeeded runs): a source quietly returning less |
+| Volume normal vs recent runs (`volume_vs_baseline`) | Run fails | Fewer than 70% of the typical count (the median of the last 7 good runs): a source quietly returning less |
 | Every event has a venue (`events_without_venue`) | Warning only | Upstream data gaps |
 | Venues outside California (`venues_outside_ca`) | Warning only | Out-of-area venues in the LA market: 2 in Canada today |
 | Onsale dates plausible (`implausible_onsales`) | Warning only | Any onsale set aside for a reason other than Ticketmaster's known 1900 placeholder |
@@ -109,13 +111,14 @@ They run after every complete run. Two counts may differ by up to max(2 events, 
 2. **So the scheduled GitHub Actions run turns red,** and GitHub notifies the user who last changed the workflow's cron line.
 3. **To get that as an email,** go to github.com/settings/notifications → **System** → **Actions**, choose **Email**, tick **Only notify for failed workflows**, and save.
 4. **Warnings don't fail the run;** they show on the dashboard.
-5. **A schedule that stops is silent:** no run means no red run. The dashboard's freshness is the backstop: **LATE** after 1.5 schedule intervals, **STALE** after 3.
+5. **A schedule that stops is silent:** no run means no red run. The dashboard's freshness is the backstop. It counts from the last good run: **LATE** after 1.5 schedule intervals, **STALE** after 3.
+6. **A run that never finished** (killed, timed out, or cut off from the database) is closed by the next ingest as **FAILED (abandoned)**, with the reason.
 
 ## Data retention and Ticketmaster's terms
 
 Ticketmaster's terms of use say you may not "cache or store any Event Content other than for reasonable periods in order to provide the service you are providing" ([Licensed Uses and Restrictions](https://developer.ticketmaster.com/support/terms-of-use/)). So:
 
-- **Raw responses are kept for `RAW_RETENTION_DAYS` (3 days)** and pruned at the end of every run. The setting can't go above 14 days. Two exceptions, both listed under Known issues: the latest succeeded run's raw is kept however old, so a rebuild stays possible; and pruning runs inside `ingest`, so if runs stop, pruning stops too.
+- **Raw responses are kept for `RAW_RETENTION_DAYS` (3 days)** and pruned at the end of every run. The setting can't go above 14 days. The latest good run's raw is kept longer, so a rebuild stays possible, but never past 14 days.
 - **Nothing real is committed.** Real sample responses live in `local/` (gitignored). Test fixtures and these screenshots are synthetic: the same shape, invented values.
 - **Personal and non-commercial.** If the dashboard is ever hosted, it stays private.
 
@@ -126,30 +129,30 @@ Ticketmaster's terms of use say you may not "cache or store any Event Content ot
 - **GitHub's scheduler is best-effort.** Scheduled runs can be delayed at busy times, which is why the cron is minute 17 rather than the top of the hour. On a public repository, schedules are disabled after 60 days without repository activity, and that's silent: only the dashboard's STALE shows it.
 - **A read-only session, not a SELECT-only role.** The dashboard can't change data by accident, but a hostile query could switch the session back. If it's ever hosted, a SELECT-only database role is the stronger guard.
 - **The clean tables aren't pruned.** Raw ages out after 3 days, but past events stay in `events` with their first and last sighting.
-- **Rebuild only reaches back 3 days,** because that's all the raw that's kept ([decision 001](docs/decisions/001-raw-first.md) lists what it can't reproduce).
+- **Rebuild only reaches back 3 days,** because that's all the raw that's kept ([decision 001](docs/decisions/001-raw-first.md) lists what it can't reproduce). `rebuild --verify` reports the rest as not reproducible.
+- **Pruning runs inside `ingest`.** If the schedule stops, pruning stops with it, and the last raw stays until the next run (the dashboard shows STALE meanwhile).
+- **A page the database refuses isn't loaded that hour.** Its raw is kept and the run closes as failed. That page's events, up to 200, wait for the next run that loads it.
 - **Only five fields are tracked as changes:** status, date, time, venue and public onsale. A renamed show just shows its new name.
 - **The Neon compute figure is an estimate:** 16–32 CU-hours a month of the free 100. Neon's console has the real number.
 
-## Known issues
+## Independent review
 
-An independent review, by a reviewer who hadn't seen how the project was built, found these. Each was confirmed against the code, and none is fixed yet.
-
-1. **A run whose error-level checks failed still counts as `succeeded`.** So it joins the volume baseline and the dashboard's "last good run". After 4 bad runs in a row, a lasting drop becomes the new normal and the check goes green again.
-2. **One page the database refuses ends the whole run, and its raw is lost.** Raw and load share one transaction per page.
-3. **`rebuild` doesn't take the ingest lock.** Run it while no ingest is running, or a scheduled run's newer values can be overwritten with older ones.
-4. **`rebuild --verify` can't pass once raw has been pruned.** It compares `first_seen_run`, which pruned raw can't reproduce. So after 3 days it always reports differences.
-5. **The kept run has no age cap.** The latest succeeded run's raw is kept however old, and nothing prunes when runs stop.
-6. **A run killed mid-way, or one that loses its database connection, can stay `running` for good.** No problem word appears on the dashboard; GitHub still shows the red run.
+A reviewer who hadn't seen how the project was built found six issues. All six were fixed test-first on 2026-10-06: each test was seen failing before its fix ([STATUS](docs/STATUS.md)).
+1. Runs with failed checks counted as good.
+2. A refused page lost its raw.
+3. Rebuild didn't take the ingest lock.
+4. `--verify` failed after pruning.
+5. The kept raw had no age cap.
+6. Abandoned runs stayed `running`.
 
 ## What I'd build next
 
-1. **Fix the known issues above,** with tests first: count only runs with no failed error checks as good, commit raw before loading, take the lock in rebuild, compare only what retained raw can reproduce, and cap the kept run at 14 days.
-2. **A dead-man's switch.** An outside heartbeat that alerts when there's been no good run for 3 hours, because a disabled schedule never fails loudly.
-3. **A SELECT-only role and private hosting** for the dashboard.
-4. **Prune past events** from the clean tables some weeks after their date, to match the spirit of the retention rule.
-5. **Store a raw page only when its hash changes** ([decision 005](docs/decisions/005-raw-storage.md)), for a longer rebuild window in the same storage.
-6. **A second source** through `(source, source_id)`, with a mapping table to match the same show across marketplaces.
-7. **A daily digest of warnings,** so they don't depend on someone opening the dashboard.
+1. **A dead-man's switch.** An outside heartbeat that alerts when there's been no good run for 3 hours, because a disabled schedule never fails loudly.
+2. **A SELECT-only role and private hosting** for the dashboard.
+3. **Prune past events** from the clean tables some weeks after their date, to match the spirit of the retention rule.
+4. **Store a raw page only when its hash changes** ([decision 005](docs/decisions/005-raw-storage.md)), for a longer rebuild window in the same storage.
+5. **A second source** through `(source, source_id)`, with a mapping table to match the same show across marketplaces.
+6. **A daily digest of warnings,** so they don't depend on someone opening the dashboard.
 
 ![Events per week as labelled categories, with the partial week fainter, then the checks in plain English and the last runs, including a PARTIAL one](docs/images/dashboard-health.png)
 
@@ -162,7 +165,7 @@ src/marquee/       the pipeline: tm_client, windows, fetch, transform, changes, 
                    ingest, checks, rebuild, prune; queries and present for the dashboard
 dashboard/app.py   the Streamlit dashboard, layout only
 migrations/        SQL schema, applied in order and checksummed
-tests/             390 tests; fixtures and the fake API are synthetic
+tests/             406 tests; fixtures and the fake API are synthetic
 scripts/           demo_seed.py, synthetic data for the screenshots
 docs/              PLAN.md, STATUS.md (real numbers, newest first), api-notes.md, decisions/
 .github/workflows/ ci.yml (ruff, mypy strict, pytest on Postgres 18), ingest.yml (hourly)

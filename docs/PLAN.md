@@ -54,10 +54,10 @@ A live-events trading desk runs on data that has to be complete, on time and tru
 
 ### One run, step by step
 
-1. Take a Postgres advisory lock, so two runs can never overlap. If the lock is held, exit quietly.
-2. Open an `ingest_runs` row with status `running`.
+1. Take a Postgres advisory lock, so two runs can never overlap (rebuild takes the same lock). If the lock is held, exit quietly.
+2. Close runs left `running` more than 10 minutes (the workflow timeout) as `failed`, with an "abandoned:" reason. Open an `ingest_runs` row with status `running`.
 3. **Plan windows:** split the next 90 days into date windows small enough that each has 1,000 results or fewer (§4).
-4. For each window, fetch every page. Then make the two undated calls for TBA and TBD events (§4). **Each page is one transaction:** save raw → transform → detect changes against the stored rows → write `event_changes` → upsert. A page either fully lands or not at all, so a crash halfway is always safe to re-run.
+4. For each window, fetch every page. Then make the two undated calls for TBA and TBD events (§4). **Each page's raw is committed first, on its own.** Then one transaction transforms it, detects changes against the stored rows, writes `event_changes` and upserts. The page's rows either fully land or not at all, so a crash halfway is always safe to re-run. A page the database refuses keeps its raw; the run carries on and closes as `failed`.
 5. Run the checks (§5) and write `check_results`.
 6. Prune raw responses older than the retention window (§8).
 7. Close the run: `succeeded`, `partial` (budget guard stopped it early), or `failed` (with the error).
@@ -305,11 +305,13 @@ A run that didn't complete (`partial` or `failed`) skips the checks; it's alread
 
 **Prune** runs at the end of every run:
 - It deletes the raw of **whole runs** that started more than `RAW_RETENTION_DAYS` ago.
-- It **always keeps the latest succeeded run's raw**, so a rebuild has one complete run even if the scheduler stopped.
+- It **keeps the latest good run's raw past the retention, for at most 14 days** (the terms limit), so a rebuild has one complete run even if the scheduler stopped.
 - Run records and check results are kept.
 - Manual use: `python -m marquee prune [--dry-run]`. Report a run's checks with `python -m marquee checks [--run N]`.
 
-**Freshness** is computed by the dashboard, not stored: the age since the last `succeeded` run, measured against the schedule interval (a setting). Under 1.5 intervals it shows **Fresh** in the accent colour, under 3 intervals **LATE** in amber, beyond that **STALE** in red. The word always shows, so colour is never the only signal. For an hourly schedule that's 90 minutes and 3 hours.
+**A good run** is one whose fetch `succeeded` and whose error-level checks all passed. `status` keeps meaning the fetch outcome; the dashboard shows a succeeded run with failed checks as "succeeded · CHECKS FAILED". Only good runs count for freshness, listed events, the volume baseline and prune's kept run (`runs.py`).
+
+**Freshness** is computed by the dashboard, not stored: the age since the last good run, measured against the schedule interval (a setting). Under 1.5 intervals it shows **Fresh** in the accent colour, under 3 intervals **LATE** in amber, beyond that **STALE** in red. The word always shows, so colour is never the only signal. For an hourly schedule that's 90 minutes and 3 hours.
 
 ---
 
