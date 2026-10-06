@@ -98,8 +98,11 @@ def test_raw_is_kept_exactly_as_received(migrated: Schema) -> None:
     run(migrated, api)
     rows = query(migrated, "SELECT params, body_gzip, body_sha256, body_bytes"
                            " FROM raw_responses ORDER BY raw_id")
-    assert len(rows) == len(api.sent)
-    for (params, packed, sha, size), sent in zip(rows, api.sent, strict=True):
+    # Every response except the whole-range count (size=1), which is a check, not data.
+    saved = [body for req, body in zip(api.requests, api.sent, strict=True)
+             if req.url.params.get("size") != "1"]
+    assert len(rows) == len(saved)
+    for (params, packed, sha, size), sent in zip(rows, saved, strict=True):
         assert gzip.decompress(packed) == sent  # type: ignore[arg-type]
         assert (sha, size) == (hashlib.sha256(sent).hexdigest(), len(sent))
         assert "apikey" not in {k.lower() for k in params}  # type: ignore[union-attr]

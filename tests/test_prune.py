@@ -32,12 +32,16 @@ def migrated(schema: Schema) -> Schema:
 
 
 def runs_aged(schema: Schema, *days_old: float, status: str = "succeeded") -> list[int]:
-    """One real (fake-API) ingest per age, then backdated by that many days."""
+    """One real (fake-API) ingest per age, then backdated by that many days.
+
+    Ingest prunes at the end of every run; a 14-day retention here keeps that out of the way, so
+    the only pruning is the one under test.
+    """
     api = FakeDiscovery(spread(30, WHOLE.start, WHOLE.end))
     ids = []
     for days in days_old:
         with schema.connect() as conn:
-            s = ingest(conn, client_for(api), now=NOW)
+            s = ingest(conn, client_for(api), now=NOW, retention_days=14)
             assert s is not None
             conn.execute("UPDATE ingest_runs SET started_at = now() - make_interval(secs => %s),"
                          " status = %s WHERE run_id = %s", (days * 86400, status, s.run_id))
