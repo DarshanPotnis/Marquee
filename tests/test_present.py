@@ -119,3 +119,20 @@ def test_run_statuses_always_carry_a_word(status: str, word: str) -> None:
 def test_event_times_show_tba_when_unknown() -> None:
     assert la_date(date(2026, 12, 4)) == "Dec 4"
     assert change_text("local_time", None, time(20, 0).isoformat()) == "TBA → 8:00 PM"
+
+
+@pytest.mark.parametrize(("failed", "warnings", "text"),
+                         [(0, 0, "0 failed · 0 warnings"), (0, 1, "0 failed · 1 warning"),
+                          (2, 3, "2 failed · 3 warnings")])
+def test_the_checks_summary(failed: int, warnings: int, text: str) -> None:
+    from marquee.present import checks_summary
+    assert checks_summary(failed, warnings) == text
+
+
+def test_event_times_and_field_labels_and_sizes() -> None:
+    from marquee.present import event_time, field_label, megabytes
+    assert (event_time(time(20, 0)), event_time(None)) == ("8:00 PM", "TBA")
+    assert [field_label(f) for f in ("status", "local_date", "local_time", "venue",
+                                     "public_sale_start")] == \
+        ["Status", "Date", "Time", "Venue", "Public onsale"]
+    assert (megabytes(13_480_000), megabytes(1024 ** 3)) == ("12.9 MB", "1,024.0 MB")
