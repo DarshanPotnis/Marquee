@@ -15,9 +15,10 @@ from datetime import UTC, date, datetime, time
 from marquee import db
 from marquee.changes import entered_window
 from marquee.db import Connection
+from marquee.runs import GOOD_RUN
 
 STATEMENT_TIMEOUT = "5s"
-_LISTED = "e.last_seen_run >= (SELECT max(run_id) FROM ingest_runs WHERE status = 'succeeded')"
+_LISTED = f"e.last_seen_run >= (SELECT max(run_id) FROM ingest_runs WHERE {GOOD_RUN})"
 
 
 @dataclass(frozen=True)
@@ -137,8 +138,7 @@ def latest_run(conn: Connection) -> RunRow | None:
 
 
 def last_success_at(conn: Connection) -> datetime | None:
-    row = conn.execute("SELECT max(finished_at) FROM ingest_runs WHERE status = 'succeeded'"
-                       ).fetchone()
+    row = conn.execute(f"SELECT max(finished_at) FROM ingest_runs WHERE {GOOD_RUN}").fetchone()
     return row[0] if row else None
 
 

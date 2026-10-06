@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from marquee.runs import ABANDONED
+
 LA = ZoneInfo("America/Los_Angeles")
 SCOPE_LABEL = ("Ticketmaster LA market (DMA 324) · Music · next 90 days · "
                "face-value data, no resale prices")
@@ -93,7 +95,12 @@ def result_word(passed: bool, severity: str) -> str:
     return "FAILED" if severity == "error" else "WARNING"
 
 
-def run_status_word(status: str) -> str:
+def run_status_word(status: str, checks_failed: int | None = None, error: str | None = None) -> str:
+    """The fetch status, plus what it doesn't say: failed checks, or a run nobody finished."""
+    if status == "succeeded" and checks_failed:
+        return "succeeded · CHECKS FAILED"
+    if status == "failed" and error and error.startswith(ABANDONED):
+        return "FAILED (abandoned)"
     return {"partial": "PARTIAL", "failed": "FAILED"}.get(status, status)
 
 

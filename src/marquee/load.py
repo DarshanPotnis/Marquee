@@ -24,15 +24,17 @@ from marquee.transform import AttractionRow, EventRow, PageRows, VenueRow
 SOURCE = "ticketmaster"
 
 
-def save_raw(conn: Connection, run_id: int, page: Page) -> None:
+def save_raw(conn: Connection, run_id: int, page: Page) -> int:
     """Keep the response exactly as received: gzip of the bytes, their SHA-256 and size."""
-    conn.execute(
+    row = conn.execute(
         "INSERT INTO raw_responses"
         " (run_id, endpoint, params, http_status, body_gzip, body_sha256, body_bytes)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING raw_id",
         (run_id, EVENTS_PATH, Jsonb(page.params), page.http_status, gzip.compress(page.raw),
          hashlib.sha256(page.raw).hexdigest(), len(page.raw)),
-    )
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 @dataclass(frozen=True)

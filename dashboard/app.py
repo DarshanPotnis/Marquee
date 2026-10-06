@@ -248,7 +248,8 @@ def runs_panel(d: dict[str, Any]) -> None:
         st.info("No runs yet. Run `python -m marquee ingest`.")
         return
     st.dataframe([{"Run": r.run_id, "Started": present.la_time(r.started_at),
-                   "Status": present.run_status_word(r.status), "Calls": r.api_calls,
+                   "Status": present.run_status_word(r.status, r.checks_failed, r.error),
+                   "Calls": r.api_calls,
                    "Reported": present.number(r.reported_total),
                    "Fetched": present.number(r.fetched_total),
                    "Unique (incl. undated)": present.number(r.unique_events),

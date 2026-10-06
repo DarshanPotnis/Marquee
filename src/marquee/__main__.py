@@ -116,8 +116,8 @@ def run_ingest(settings: Settings) -> int:
     with db.connect(settings.database_url) as conn, make_client(settings) as client:
         s = ingest(conn, client, now=utc_now(), retention_days=settings.raw_retention_days)
     if s is None:
-        log.info("ingest: another ingest is running (lock 'marquee.ingest' is held); "
-                 "nothing to do")
+        log.info("ingest: another ingest or a rebuild is running (lock 'marquee.ingest' is "
+                 "held); nothing to do")
         return 0
     bad = s.status != "succeeded" or s.checks_failed > 0
     level = logging.ERROR if bad else logging.INFO
@@ -166,10 +166,11 @@ def run_prune(settings: Settings, *, dry_run: bool) -> int:
         r = prune(conn, retention_days=settings.raw_retention_days, dry_run=dry_run)
     verb = "would delete" if dry_run else "deleted"
     log.info(
-        "prune: cutoff %s (%d days); %s %d raw responses from %d run%s (%.1f KB stored); "
-        "always keeping run %s (latest succeeded)",
+        "prune: cutoff %s (%d days); %s %d raw responses from %d run%s (%.1f KB stored); %s",
         r.cutoff.isoformat(timespec="seconds"), settings.raw_retention_days, verb, r.raw_rows,
-        len(r.runs), "" if len(r.runs) == 1 else "s", r.raw_bytes / 1024, r.kept_run,
+        len(r.runs), "" if len(r.runs) == 1 else "s", r.raw_bytes / 1024,
+        f"keeping run {r.kept_run} (latest good run, kept up to 14 days)" if r.kept_run
+        else "no good run in the last 14 days to keep",
     )
     return 0
 
@@ -187,10 +188,18 @@ def run_rebuild(settings: Settings, *, verify_only: bool) -> int:
     except RebuildError as exc:
         log.error("rebuild: %s", exc)
         return 1
+    except db.LockHeld:
+        log.error("rebuild: an ingest is running (lock 'marquee.ingest' is held); nothing was "
+                  "changed. Try again when it finishes.")
+        return 1
     for d in v.diffs:
         log.log(logging.INFO if d.only_live == d.only_rebuilt == 0 else logging.ERROR,
-                "rebuild --verify: %s: %d only live, %d only rebuilt%s", d.table, d.only_live,
-                d.only_rebuilt, f" (e.g. {', '.join(d.samples)})" if d.samples else "")
+                "rebuild --verify: %s: %d only live, %d only rebuilt, %d not reproducible "
+                "(pruned)%s", d.table, d.only_live, d.only_rebuilt, d.pruned,
+                f" (e.g. {', '.join(d.samples)})" if d.samples else "")
+    if v.first_seen_pruned:
+        log.info("rebuild --verify: first_seen_run not reproducible (pruned) for %d events, "
+                 "first seen in runs whose raw is gone", v.first_seen_pruned)
     log.log(logging.INFO if v.ok else logging.ERROR,
             "rebuild --verify: replayed %d raw pages from %d runs into a throwaway schema; "
             "differences: %s; live tables unchanged; 0 API calls", v.raw_pages, v.runs,

@@ -1,8 +1,10 @@
-"""One ingest run (PLAN §2): lock, open the run, fetch, save and load page by page, check, prune,
-close the run.
+"""One ingest run (PLAN §2): lock, close abandoned runs, open the run, fetch, save and load page by
+page, check, prune, close the run.
 
-Each page is one transaction: save raw, transform, detect changes, upsert. A page either fully
-lands or not at all, so a run that stops halfway is always safe to re-run.
+Each page's raw is committed first, on its own, so it survives whatever happens next. Then one
+transaction transforms, detects changes and upserts: the page's rows fully land or not at all, so
+a run that stops halfway is always safe to re-run. A page the database refuses is recorded and
+skipped; the run carries on, then closes as failed.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from marquee.db import INGEST_LOCK, Connection, LockHeld, advisory_lock
 from marquee.fetch import BASE_QUERY, CAP, RangeResult, fetch_range, fetch_window
 from marquee.load import SOURCE, load_rows, save_raw
 from marquee.prune import prune
+from marquee.runs import ABANDONED, ABANDONED_AFTER, GOOD_RUN
 from marquee.tm_client import BudgetExhausted, Page, TicketmasterClient, TicketmasterError
 from marquee.transform import transform_page
 from marquee.windows import Window, api_time, plan_range, plan_windows
@@ -64,6 +67,7 @@ class _Tally:
     ids: set[str] = field(default_factory=set)
     undated_ids: set[str] = field(default_factory=set)
     onsale_nulled: Counter[str] = field(default_factory=Counter)
+    refused: list[str] = field(default_factory=list)  # "raw 123: DataError: ..." per page
 
 
 def ingest(
@@ -86,6 +90,7 @@ def _run(
     conn: Connection, client: TicketmasterClient, now: datetime, split_threshold: int,
     retention_days: int,
 ) -> RunSummary:
+    _close_abandoned(conn)
     whole = plan_range(now)
     opened = conn.execute(
         "INSERT INTO ingest_runs (source, range_start, range_end) VALUES (%s, %s, %s)"
@@ -96,11 +101,19 @@ def _run(
     tally = _Tally()
 
     def on_page(window: Window | None, page: Page) -> None:
+        with conn.transaction():  # raw first, on its own: it survives a page that fails to load
+            raw_id = save_raw(conn, run_id, page)
         # The run's own start time, so a rebuild applies the onsale rule exactly the same way.
         rows = transform_page(page.body, run_at=started_at)
-        with conn.transaction():
-            save_raw(conn, run_id, page)
-            load_rows(conn, run_id, rows)
+        try:
+            with conn.transaction():
+                load_rows(conn, run_id, rows)
+        except psycopg.Error as exc:
+            if conn.broken:
+                raise  # the connection is gone, not just this page: the run fails
+            tally.refused.append(f"raw {raw_id}: {type(exc).__name__}: {exc}")
+            log.error("ingest: the database refused raw %d (kept for rebuild): %s", raw_id, exc)
+            return
         ids = {e.source_id for e in rows.events}
         tally.ids |= ids
         if window is None:
@@ -129,6 +142,10 @@ def _run(
         _close(conn, run_id, "failed", f"{type(exc).__name__}: {exc}", result, tally,
                client.calls - calls_before, client.budget_left, (), 0)
         raise
+    if status == "succeeded" and tally.refused:
+        status = "failed"
+        error = (f"the database refused {len(tally.refused)} page(s), raw kept; first: "
+                 f"{tally.refused[0]}")
     # Checks judge a complete run; a partial or failed run is already a bad run on its own.
     checks: tuple[CheckResult, ...] = ()
     if status == "succeeded" and result is not None:
@@ -143,7 +160,7 @@ def _facts(
     conn: Connection, run_id: int, result: RangeResult, total_reported: int | None, tally: _Tally
 ) -> RunFacts:
     prior = conn.execute(
-        "SELECT unique_events FROM ingest_runs WHERE status = 'succeeded' AND run_id < %s"
+        f"SELECT unique_events FROM ingest_runs WHERE {GOOD_RUN} AND run_id < %s"
         " AND unique_events IS NOT NULL ORDER BY run_id DESC LIMIT %s", (run_id, BASELINE_RUNS),
     ).fetchall()
     no_venue = conn.execute(
@@ -164,6 +181,21 @@ def _facts(
         venues_outside_ca=tuple(f"{name} ({city}, {state})" for name, city, state in outside),
         onsale_nulled=dict(tally.onsale_nulled),
     )
+
+
+def _close_abandoned(conn: Connection) -> None:
+    """Close runs left "running" past the workflow's timeout. Called holding the ingest lock, so
+    no live run can be among them."""
+    minutes = int(ABANDONED_AFTER.total_seconds() // 60)
+    closed = conn.execute(
+        "UPDATE ingest_runs SET status = 'failed', finished_at = now(), error = %s"
+        " WHERE status = 'running' AND started_at < now() - %s RETURNING run_id",
+        (f"{ABANDONED} still running {minutes}+ minutes after it started (killed, timed out or"
+         " lost its database connection); closed by the next ingest", ABANDONED_AFTER),
+    ).fetchall()
+    if closed:
+        log.warning("ingest: closed %d abandoned run(s) as failed: %s", len(closed),
+                    ", ".join(str(r[0]) for r in closed))
 
 
 def _save_checks(conn: Connection, run_id: int, checks: tuple[CheckResult, ...]) -> None:
