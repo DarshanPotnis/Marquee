@@ -17,11 +17,13 @@ import streamlit as st
 
 from marquee import config, present, queries
 from marquee.db import DatabaseConnectError
+from marquee.windows import RANGE_DAYS
 
 ACCENT = "#2563EB"  # the one accent colour; also set in .streamlit/config.toml
 CACHE_SECONDS = 60
 DEFAULT_DAYS = 14
-RANGE_DAYS = 90
+UPCOMING_ROWS = 15  # beyond this many rows the upcoming table scrolls instead of growing
+UPCOMING_HEIGHT = 560
 NEON_FREE_LIMIT = 1024 ** 3  # used when the server doesn't report neon.max_cluster_size
 _COLOUR = {"fresh": "blue", "late": "orange", "stale": "red", "partial": "orange",
            "failed": "red", "error": "red", "warning": "orange"}
@@ -37,11 +39,29 @@ def today(now: datetime) -> date:
     return now.astimezone(present.LA).date()
 
 
+def last_day(first: date) -> date:
+    return first + timedelta(days=RANGE_DAYS - 1)  # the range counts today as day 1
+
+
+def status_cell(status: str | None) -> str:
+    """Markdown for st.table: cancelled, postponed and rescheduled shout in amber."""
+    word = present.event_status(status)
+    if present.is_problem_status(status):
+        return coloured("warning", word)
+    return present.md_escape(word)  # the status comes from the API too
+
+
+def result_cell(passed: bool, severity: str) -> str:
+    word = present.result_word(passed, severity)
+    return word if passed else coloured(severity, word)
+
+
 @st.cache_data(ttl=CACHE_SECONDS, show_spinner=False)
 def overview() -> dict[str, Any]:
     settings = config.settings_from_environment()
     now = queries.utc_now()
     day = today(now)
+    last = last_day(day)
     with queries.connect_readonly(settings.database_url) as conn:
         return {
             "now": now,
@@ -53,10 +73,10 @@ def overview() -> dict[str, Any]:
             "changes": queries.recent_changes(conn, now - timedelta(days=1)),
             "new_shows": queries.new_shows(conn, now - timedelta(days=1)),
             "onsales": queries.onsales_between(conn, now, now + timedelta(days=7)),
-            "weeks": queries.events_per_week(conn, day, weeks=14),
+            "weeks": queries.events_per_week(conn, day, weeks=present.weeks_spanned(day, last)),
             "runs": queries.recent_runs(conn, 24),
             "storage": queries.storage(conn),
-            "options": queries.filter_options(conn, day, day + timedelta(days=RANGE_DAYS)),
+            "options": queries.filter_options(conn, day, last),
         }
 
 
@@ -115,23 +135,24 @@ def checks_panel(d: dict[str, Any]) -> None:
         return
     run_id, rows = found
     st.caption(f"Run {run_id}, problems first")
-    for r in rows:
-        if not r.passed:
-            st.markdown(f"{coloured(r.severity, present.result_word(r.passed, r.severity))} "
-                        f"`{r.name}`: {r.detail or ''}")
-    st.dataframe([{"Result": present.result_word(r.passed, r.severity), "Check": r.name,
-                   "Severity": r.severity, "Detail": r.detail or ""} for r in rows],
-                 hide_index=True, width="stretch")
+    # st.table, not st.dataframe: its cells are Markdown, so a result can carry its colour.
+    # The code name is grey because :small alone is the table's own size, and `code` is green.
+    st.table([{"Result": result_cell(r.passed, r.severity),
+               "Check": f"{present.check_title(r.name)}  \n"
+                        f":gray[:small[{present.md_escape(r.name)}]]",
+               "If it fails": present.if_it_fails(r.severity),
+               "Detail": present.md_escape(r.detail or "")} for r in rows], hide_index=True)
 
 
 def changes_panel(d: dict[str, Any]) -> None:
     st.subheader("Changes in the last 24 hours")
+    day = today(d["now"])
     st.markdown("**New shows**")
     if not d["new_shows"]:
         st.info("No new shows in the last 24 hours.")
     else:
         st.dataframe([{"First seen": present.la_time(s.first_seen_at), "Show": s.show,
-                       "Venue": s.venue or "", "Date": present.la_date(s.event_date),
+                       "Venue": s.venue or "", "Date": present.event_date(s.event_date, day),
                        "Time": present.event_time(s.event_time)} for s in d["new_shows"]],
                      hide_index=True, width="stretch")
     st.markdown("**Changes**")
@@ -139,7 +160,8 @@ def changes_panel(d: dict[str, Any]) -> None:
         st.info("No changes in the last 24 hours.")
     else:
         st.dataframe([{"When": present.la_time(c.detected_at), "Show": c.show,
-                       "Venue": c.venue or "", "Event date": present.la_date(c.event_date),
+                       "Venue": c.venue or "",
+                       "Event date": present.event_date(c.event_date, day),
                        "What": present.field_label(c.field),
                        "Change": present.change_text(c.field, c.old, c.new)}
                       for c in d["changes"]], hide_index=True, width="stretch")
@@ -150,8 +172,9 @@ def onsales_panel(d: dict[str, Any]) -> None:
     if not d["onsales"]:
         st.info("No public onsales in the next 7 days.")
         return
-    st.dataframe([{"Onsale": present.la_time(o.onsale_at), "Show": o.show,
-                   "Venue": o.venue or "", "Event date": present.la_date(o.event_date)}
+    day = today(d["now"])
+    st.dataframe([{"Onsale": present.la_time(o.onsale_at, day), "Show": o.show,
+                   "Venue": o.venue or "", "Event date": present.event_date(o.event_date, day)}
                   for o in d["onsales"]], hide_index=True, width="stretch")
 
 
@@ -162,7 +185,7 @@ def upcoming_panel(d: dict[str, Any]) -> None:
     dates_col, venue_col, status_col = st.columns([2, 3, 2])
     picked = dates_col.date_input("Dates", value=(first, first + timedelta(days=DEFAULT_DAYS)),
                                   min_value=first,
-                                  max_value=first + timedelta(days=RANGE_DAYS),
+                                  max_value=last_day(first),
                                   format="YYYY-MM-DD")
     venues = venue_col.multiselect("Venue", venue_options)
     statuses = status_col.multiselect("Status", status_options)
@@ -174,11 +197,14 @@ def upcoming_panel(d: dict[str, Any]) -> None:
         st.info("No events match these filters.")
         return
     st.caption(f"Showing {present.number(len(rows))} of {present.number(total)} events")
-    st.dataframe([{"Date": present.la_date(e.event_date), "Time": present.event_time(e.event_time),
-                   "Show": e.show, "Venue": e.venue or "", "City": e.city or "",
-                   "Status": e.status or "",
-                   "Public onsale": present.la_time(e.onsale_at) if e.onsale_at else ""}
-                  for e in rows], hide_index=True, width="stretch")
+    # st.table so a problem status can be amber; every value from the API is escaped, because
+    # real names carry Markdown ("Nice as F**k", "[THE X : NEXUS]").
+    st.table([{"Date": present.event_date(e.event_date, first),
+               "Time": present.event_time(e.event_time), "Show": present.md_escape(e.show),
+               "Venue": present.md_escape(e.venue or ""), "City": present.md_escape(e.city or ""),
+               "Status": status_cell(e.status), "Public onsale": present.onsale(e.onsale_at, first)}
+              for e in rows], hide_index=True,
+             height="content" if len(rows) <= UPCOMING_ROWS else UPCOMING_HEIGHT)
 
 
 def weekly_panel(d: dict[str, Any]) -> None:
@@ -187,8 +213,29 @@ def weekly_panel(d: dict[str, Any]) -> None:
     if sum(n for _, n in weeks) == 0:
         st.info("No listed events to chart yet.")
         return
-    st.bar_chart({"Week starting": [w for w, _ in weeks], "Events": [n for _, n in weeks]},
-                 x="Week starting", y="Events", color=ACCENT, width="stretch")
+    first = today(d["now"])
+    last = last_day(first)
+    st.vega_lite_chart(weekly_spec([
+        {"Week": present.week_label(w, first, last), "Events": n,
+         "partial": present.partial_week(w, first, last)} for w, n in weeks]), width="stretch")
+    st.caption(present.weekly_caption(first, last))
+
+
+def weekly_spec(values: list[dict[str, Any]]) -> dict[str, Any]:
+    """Weeks as labelled categories in week order (sort None), so bars get a band's width; a
+    partial week is fainter, and its label says "(partial)" so the colour is never alone."""
+    return {
+        "data": {"values": values},
+        "mark": {"type": "bar", "color": ACCENT, "cornerRadiusEnd": 4, "width": {"band": 0.6}},
+        "encoding": {
+            "x": {"field": "Week", "type": "nominal", "sort": None,
+                  "title": "Week starting (Monday)", "axis": {"labelAngle": 0}},
+            "y": {"field": "Events", "type": "quantitative", "title": "Listed events"},
+            "opacity": {"condition": {"test": "datum.partial", "value": 0.45}, "value": 1},
+            "tooltip": [{"field": "Week", "title": "Week starting"},
+                        {"field": "Events", "title": "Listed events"}],
+        },
+    }
 
 
 def runs_panel(d: dict[str, Any]) -> None:
@@ -200,7 +247,8 @@ def runs_panel(d: dict[str, Any]) -> None:
                    "Status": present.run_status_word(r.status), "Calls": r.api_calls,
                    "Reported": present.number(r.reported_total),
                    "Fetched": present.number(r.fetched_total),
-                   "Unique": present.number(r.unique_events), "Changes": r.changes,
+                   "Unique (incl. undated)": present.number(r.unique_events),
+                   "Undated": present.number(r.undated_events), "Changes": r.changes,
                    "Failed checks": present.number(r.checks_failed),
                    "Raw pruned": present.number(r.pruned_raw), "Error": r.error or ""}
                   for r in d["runs"]], hide_index=True, width="stretch")
@@ -233,11 +281,13 @@ def main() -> None:
                  "read-only and changed nothing.")
         st.stop()
     headline(d)
-    checks_panel(d)
+    st.header("Market")
     changes_panel(d)
     onsales_panel(d)
     upcoming_panel(d)
     weekly_panel(d)
+    st.header("Pipeline health")
+    checks_panel(d)
     runs_panel(d)
     storage_panel(d)
     st.caption("Read-only · refreshed at most every 60 s · times in Los Angeles (PT)")
