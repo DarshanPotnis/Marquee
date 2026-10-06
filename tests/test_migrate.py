@@ -1,6 +1,6 @@
 """The migration runner and `python -m marquee migrate` against a real Postgres.
 
-Uses TEST_DATABASE_URL and skips cleanly without it. Each test gets a throwaway schema.
+Uses MARQUEE_TEST_DATABASE_URL and skips cleanly without it. Each test gets a throwaway schema.
 """
 
 import logging
@@ -37,10 +37,9 @@ def hold_migrate_lock(schema: Schema) -> psycopg.Connection:
 
 def use_test_schema(schema: Schema, monkeypatch: pytest.MonkeyPatch) -> None:
     # Hand the CLI its settings directly, so these tests never read the real .env (and its
-    # production DATABASE_URL), and point its connections at the throwaway schema.
-    monkeypatch.setattr(
-        cli, "settings_from_environment", lambda: load_settings({"DATABASE_URL": schema.url})
-    )
+    # production MARQUEE_DATABASE_URL), and point its connections at the throwaway schema.
+    settings = load_settings({"MARQUEE_DATABASE_URL": schema.url})
+    monkeypatch.setattr(cli, "settings_from_environment", lambda: settings)
     monkeypatch.setattr(db, "connect", lambda url: schema.connect())
 
 

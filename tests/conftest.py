@@ -1,4 +1,4 @@
-"""Shared fixtures. Integration tests use TEST_DATABASE_URL, each in its own throwaway schema."""
+"""Shared fixtures. Integration tests use MARQUEE_TEST_DATABASE_URL, one throwaway schema each."""
 
 import os
 import uuid
@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _test_database_url() -> str | None:
     # Same rule as the app: if the shell and .env disagree, fail rather than guess.
-    url = read_environment(ROOT / ".env", names=["TEST_DATABASE_URL"]).get(
-        "TEST_DATABASE_URL"
+    url = read_environment(ROOT / ".env", names=["MARQUEE_TEST_DATABASE_URL"]).get(
+        "MARQUEE_TEST_DATABASE_URL"
     )
     return (url or "").strip() or None
 
@@ -29,8 +29,8 @@ def test_database_url() -> str:
     if url is None:
         # CI sets this so a missing database fails the build instead of skipping silently.
         if os.environ.get("MARQUEE_REQUIRE_DB_TESTS"):
-            pytest.fail("TEST_DATABASE_URL is not set, but MARQUEE_REQUIRE_DB_TESTS is")
-        pytest.skip("TEST_DATABASE_URL is not set")
+            pytest.fail("MARQUEE_TEST_DATABASE_URL is not set, but MARQUEE_REQUIRE_DB_TESTS is")
+        pytest.skip("MARQUEE_TEST_DATABASE_URL is not set")
     return url
 
 
