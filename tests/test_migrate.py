@@ -15,6 +15,7 @@ from marquee import db
 from marquee.__main__ import main
 from marquee.config import load_settings
 from marquee.db import MIGRATE_LOCK, LockHeld, MigrationError, migrate
+from marquee.db import connect as direct_connect
 
 EXPECTED_TABLES = {
     "ingest_runs", "raw_responses", "venues", "attractions", "events", "event_attractions",
@@ -33,7 +34,7 @@ def tables(conn: psycopg.Connection) -> set[str]:
 
 
 def hold_migrate_lock(schema: Schema) -> psycopg.Connection:
-    holder = psycopg.connect(schema.url, autocommit=True)
+    holder = direct_connect(schema.url)
     holder.execute("SELECT pg_advisory_lock(%s)", (MIGRATE_LOCK.key,))
     return holder
 

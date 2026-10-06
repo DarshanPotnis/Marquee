@@ -9,7 +9,6 @@ import logging
 from datetime import UTC, datetime
 
 import httpx
-import psycopg
 import pytest
 from conftest import Schema
 from fake_discovery import FakeDiscovery, FakeEvent, client_for, page_of, spread, undated
@@ -18,6 +17,7 @@ import marquee.__main__ as cli
 from marquee import db
 from marquee.config import load_settings
 from marquee.db import INGEST_LOCK, migrate
+from marquee.db import connect as direct_connect
 from marquee.ingest import RunSummary, ingest
 from marquee.load import load_rows
 from marquee.tm_client import QUOTA_VIOLATION
@@ -182,7 +182,7 @@ def test_a_repeat_change_back_to_the_start_leaves_no_row(migrated: Schema) -> No
 
 def test_a_held_lock_means_the_run_exits_quietly(migrated: Schema) -> None:
     api = FakeDiscovery(spread(10, WHOLE.start, WHOLE.end))
-    with psycopg.connect(migrated.url, autocommit=True) as holder:
+    with direct_connect(migrated.url) as holder:
         holder.execute("SELECT pg_advisory_lock(%s)", (INGEST_LOCK.key,))
         assert run(migrated, api) is None
     assert counts(migrated)["ingest_runs"] == 0
@@ -244,7 +244,7 @@ def test_the_ingest_command_exits_quietly_when_another_run_holds_the_lock(
     migrated: Schema, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     use(monkeypatch, migrated, FakeDiscovery([]))
-    with psycopg.connect(migrated.url, autocommit=True) as holder, caplog.at_level(logging.INFO):
+    with direct_connect(migrated.url) as holder, caplog.at_level(logging.INFO):
         holder.execute("SELECT pg_advisory_lock(%s)", (INGEST_LOCK.key,))
         assert cli.main(["ingest"]) == 0
     assert "another ingest is running" in caplog.text

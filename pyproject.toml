@@ -31,7 +31,7 @@ files = ["src/marquee"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -p pytester"
 
 [dependency-groups]
 dev = [

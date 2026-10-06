@@ -3,7 +3,7 @@
 import os
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import psycopg
@@ -11,6 +11,7 @@ import pytest
 from psycopg import sql
 
 from marquee.config import load_test_database_url, read_environment
+from marquee.db import connect as direct_connect
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,11 +37,12 @@ def test_database_url() -> str:
 
 @dataclass(frozen=True)
 class Schema:
-    url: str
-    name: str
+    # repr=False: pytest prints fixture values when a test fails, and the URL holds a password.
+    url: str = field(repr=False)
+    name: str = ""
 
     def connect(self) -> psycopg.Connection:
-        conn = psycopg.connect(self.url, autocommit=True)
+        conn = direct_connect(self.url)
         conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(self.name)))
         return conn
 
@@ -49,7 +51,7 @@ class Schema:
 def schema(test_database_url: str) -> Iterator[Schema]:
     """A fresh, empty schema per test, dropped afterwards, so the test database stays clean."""
     s = Schema(test_database_url, f"marquee_test_{uuid.uuid4().hex[:12]}")
-    with psycopg.connect(test_database_url, autocommit=True) as admin:
+    with direct_connect(test_database_url) as admin:
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(s.name)))
         try:
             yield s
