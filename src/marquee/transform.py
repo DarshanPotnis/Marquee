@@ -99,10 +99,12 @@ def _event(
     starts_at = _parse(_utc, start.get("dateTime"))
     segment, genre = _classification(raw.get("classifications"))
     tz = _zone(_text(dates.get("timezone")) or (venue.timezone if venue else None))
-    # A date-only event counts as starting at the end of its local day.
-    reference = starts_at or (
-        datetime.combine(local_date + timedelta(days=1), time(), tzinfo=tz).astimezone(UTC)
-        if local_date else None)
+    # What the onsale must come before: the start; else the end of the local day; else, for an
+    # undated (TBA) event, its original date if the API still gives one.
+    original = _dict(dates.get("initialStartDate"))
+    reference = (starts_at or _end_of_day(local_date, tz)
+                 or _parse(_utc, original.get("dateTime"))
+                 or _end_of_day(_parse(date.fromisoformat, original.get("localDate")), tz))
     onsale, reason = _plausible_onsale(
         _dict(_dict(raw.get("sales")).get("public")).get("startDateTime"), reference, run_at)
     ids = tuple(dict.fromkeys(a.source_id for a in listed))  # first listing wins
@@ -133,12 +135,18 @@ def _plausible_onsale(
         if onsale < event_start - ONSALE_MAX_LEAD:
             return None, "too_early"
         return onsale, None
-    # Undated (TBA) event: nothing to compare with but the run itself.
-    if onsale < run_at - ONSALE_MAX_LEAD:
-        return None, "too_early"
+    # Undated, with no original date: a postponed show's onsale can be years old and still
+    # real, so accept any past onsale. Only one more than 2 years in the future is implausible.
     if onsale > run_at + ONSALE_MAX_LEAD:
         return None, "too_late"
     return onsale, None
+
+
+def _end_of_day(day: date | None, tz: ZoneInfo) -> datetime | None:
+    # A date-only event counts as starting at the end of its local day.
+    if day is None:
+        return None
+    return datetime.combine(day + timedelta(days=1), time(), tzinfo=tz).astimezone(UTC)
 
 
 def _venue(raw: object) -> VenueRow | None:
