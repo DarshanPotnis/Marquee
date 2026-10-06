@@ -35,6 +35,7 @@ Two queries appear below:
 | Daily quota | `Rate-Limit: 5000` |
 | Date format accepted | `YYYY-MM-DDTHH:mm:ssZ` only |
 | `priceRanges` | absent on all 1,200 events checked |
+| Onsale date placeholder | `sales.public.startDateTime` = `1900-01-01T…` on **235 of 1,295** events (231 of the 1,276 windowed); stored as NULL |
 
 ---
 
@@ -240,7 +241,7 @@ Measured over the 1,276 windowed events of the final query, at 2026-10-06T15:22:
 | `1900-01-01T06:00:00Z` | 184 |
 | `1900-01-01T18:00:00Z` | 51 |
 
-  `startTBD` and `startTBA` are false on all 235, and their statuses are `onsale` 230, `postponed` 3, `rescheduled` 2. **Treat any 1900 date as null.**
+  `startTBD` and `startTBA` are false on all 235, and their statuses are `onsale` 230, `postponed` 3, `rescheduled` 2. **Treat any 1900 date as null.** The transform stores it as NULL, with a unit test (Phase 4).
 - **Blind spot:** we only fetch shows happening in the next 90 days. Onsales for later shows are invisible to us, and the API's onsale filter doesn't select by public start (docs-vs-reality #4).
 
 ## 10. Errors
