@@ -64,7 +64,11 @@ A live-events trading desk runs on data that has to be complete, on time and tru
 
 ### Design rules
 
-1. **Raw first, clean second.** The transform reads only from `raw_responses`, never from the API, so `marquee rebuild` recreates every clean table without spending a single call.
+1. **Raw first, clean second.** The transform reads only from `raw_responses`, never from the API.
+   - Raw is gzip of the exact bytes received, with a SHA-256 (decision 005).
+   - `marquee rebuild` replays retained raw onto the clean tables with zero calls.
+   - `marquee rebuild --verify` rebuilds into a throwaway schema and compares.
+   - Neither touches `event_changes`. What can't be reproduced after raw is pruned is listed in decision 001.
 2. **Our own IDs.** Clean tables use our own primary keys, plus a `(source, source_id)` unique pair. A second marketplace later becomes new rows, not a redesign.
 3. **Re-running never duplicates.** Every write is `INSERT … ON CONFLICT (source, source_id) DO UPDATE`.
 4. **Silence becomes loud.** Every window records what the API said exists (`page.totalElements`) next to what we actually received.
@@ -180,6 +184,10 @@ CREATE TABLE check_results (
 );
 ```
 
+**`migrations/002_raw_gzip_and_run_counters.sql`** (decided by measurement, decision 005):
+- `raw_responses.body` (jsonb) is replaced by `body_gzip` (bytea, `STORAGE EXTERNAL`), `body_sha256` and `body_bytes`.
+- `ingest_runs` gains `probe_calls`, `probe_events`, `undated_events` and `onsale_nulled` (jsonb counts by reason).
+
 `first_seen_run` / `last_seen_run` let you answer "when did this show appear?" and "which shows vanished?" without any extra tables. A show that goes TBA stays visible through the undated calls (§4), so it isn't mistaken for a vanished one.
 
 **Change detection** is a pure function (`changes.py`). It takes the stored row and the freshly transformed row, and returns one change per tracked field that differs. A first sighting is not a change; new shows come from `first_seen_run`.
@@ -240,7 +248,12 @@ If hourly runs with 3-day retention don't fit on disk, the options in order are:
 1. Run every 3 hours.
 2. Store a raw page only when its content hash changed.
 
-Record the math in decision record 003. Running out of storage is a silent failure too, so the dashboard shows database size against the 1 GB limit.
+**Measured in Phase 4** (decision 003):
+- A run is 15 calls and **1.82 MB of raw on disk**.
+- Hourly with 3-day retention is **131 MB** of raw, against the 500 MB budget, and 360 calls a day, against 2,500.
+- So **hourly with 3-day retention fits**, and neither fallback is needed.
+
+Running out of storage is a silent failure too, so the dashboard shows database size against the 1 GB limit.
 
 ---
 
@@ -294,7 +307,7 @@ marquee/
 ├── .env.example              # TM_API_KEY, MARQUEE_DATABASE_URL, MARQUEE_TEST_DATABASE_URL, settings
 ├── migrations/001_init.sql
 ├── src/marquee/
-│   ├── __main__.py           # CLI: migrate | brute-force | fetch-windows | ingest | rebuild | checks | prune
+│   ├── __main__.py           # CLI: migrate | brute-force | fetch-windows | ingest | rebuild [--verify] | checks | prune
 │   ├── config.py             # settings from environment
 │   ├── db.py                 # connection, migrations, named advisory locks (migrate, ingest)
 │   ├── tm_client.py          # HTTP: pacing, retries, budget guard
@@ -303,7 +316,8 @@ marquee/
 │   ├── transform.py          # raw JSON -> rows (pure)
 │   ├── changes.py            # stored row vs new row -> event_changes (pure)
 │   ├── load.py               # upserts, event_changes inserts
-│   ├── ingest.py             # orchestrates one run
+│   ├── ingest.py             # orchestrates one run (windows + 2 undated calls, page by page)
+│   ├── rebuild.py            # replay raw onto live tables; --verify into a throwaway schema
 │   ├── checks.py             # check rules (pure where possible)
 │   └── queries.py            # read queries for the dashboard
 ├── dashboard/app.py          # Streamlit
@@ -346,7 +360,7 @@ Every phase starts with a plain-English plan and ends with its **done check run 
 | 1 | **Skeleton.** `pyproject`, config, `docker-compose`, migration runner, `001_init.sql`, CI. | 1 h | `python -m marquee migrate` runs twice without error; `ruff`, `mypy --strict` and `pytest` pass; CI is green. |
 | 2 | **HTTP client.** | 1.5 h | Tests pass: 429 then success; 401 fails with no retry; five 500s give up; pacing ≥ 250 ms; budget guard stops cleanly; the key never appears in params, logs or errors. |
 | 3 | **Windows.** Brute force first: a single window, run for real, record what happens. Then adaptive splitting. | 1.5 h | Tests: windows cover the whole range with no gaps; splitting stops at 1 day; an over-cap day is reported. The real-run numbers are written in `STATUS.md`. |
-| 4 | **Raw, transform, change detection, load.** | 2 h | Tests: transform handles a missing venue, missing attractions, a TBA date, a missing time (`noSpecificTime`), lat/long as strings and the 1900 onsale placeholder; loading twice gives identical counts; `rebuild` reproduces identical clean tables (row counts plus a checksum). Change detection, a pure function with tests first, writes one `event_changes` row per changed field (status, local date, local time, venue, public sale start), none when nothing changed, and none on a first sighting. On-disk raw size per run is measured and the schedule is chosen (§4). |
+| 4 | **Raw, transform, change detection, load.** | 2 h | Tests: transform handles a missing venue, missing attractions, a TBA date, a missing time (`noSpecificTime`), lat/long as strings and the 1900 onsale placeholder; loading twice gives identical counts; `rebuild --verify` (into a throwaway schema, compared on natural keys and content) finds no differences. Change detection, a pure function with tests first, writes one `event_changes` row per changed field (status, local date, local time, venue, public sale start), none when nothing changed, and none on a first sighting. On-disk raw size per run is measured and the schedule is chosen (§4). |
 | 5 | **Checks, run record, prune.** | 1 h | Each check has a passing and a failing test. A real run shows its checks in `check_results`. |
 | 6 | **Dashboard.** | 1.5 h | It shows the freshness badge, the last 24 runs (calls, reported vs fetched, status), the checks panel, an upcoming-events table with filters (date, venue, status), events per week, changes since the last day (new shows via `first_seen_run`; postponed, cancelled and rescheduled shows; date moves), one small panel of public onsales in the next 7 days (Phase 0: 6 such events; the 1900-01-01 placeholder reads as no date), and database size against the 1 GB limit. |
 | 7 | **Schedule.** `ingest.yml` runs at minute 17 on the schedule the §4 budgets allow (hourly if both fit), with secrets `TM_API_KEY` and `MARQUEE_DATABASE_URL` (Neon). | 45 min | Two scheduled runs have succeeded and appear on the dashboard, and measured calls and storage per run match the budget. |

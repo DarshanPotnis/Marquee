@@ -4,6 +4,71 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 4, raw, transform, change detection, load
+
+### Done check on production (Neon main)
+
+| Step | Result |
+|---|---|
+| `migrate` | `applied 1 (002_raw_gzip_and_run_counters.sql), already applied 1` |
+| `ingest` run 1 | 13 windows (0 split), 15 calls; reported 1,284, fetched 1,284; **unique 1,303** (19 undated); 0 changes; 22 s |
+| `ingest` run 2, straight after | Identical results; **0 changes**. Clean tables identical to after run 1, so **0 duplicate rows**: venues 128, attractions 1,893, events 1,303, event_attractions 2,296, event_changes 0. Raw went from 15 to 30 pages and runs from 1 to 2. |
+| `rebuild --verify` | Replayed 30 raw pages from 2 runs into a throwaway schema: **0 differences** in venues, attractions, events and event_attractions. Live tables unchanged, no scratch schema left, 0 API calls, 23 s. |
+| Onsale plausibility | Nulled **`placeholder_1900` 239** and **`too_early` 1** per run (see surprise 2) |
+
+### Storage (production, after 2 runs)
+
+| Table | Size |
+|---|---|
+| `raw_responses` | 3,736 KB, so **1.82 MB per run** (14.60 MB as received; 1.69 MB of gzip plus storage overhead) |
+| `events` | 968 KB |
+| `attractions` | 448 KB |
+| `event_attractions` | 424 KB |
+| `venues` | 88 KB |
+| All tables | 5.63 MB |
+| Database (`pg_database_size`) | 13.48 MB, of which about 8 MB is Postgres's own catalog |
+| Neon limit (`neon.max_cluster_size`) | 1 GB |
+| Neon's console storage figure | *not visible in SQL; to be read from the console* |
+
+**Proposed: hourly runs, 3-day raw retention** (decision 003).
+- 360 calls a day, against the 2,500 budget.
+- 131 MB of raw, against the 500 MB budget.
+- 7 days would be 306 MB. Every 3 hours would be 44 MB at 3 days.
+
+### Raw storage measurement (dev branch, one real run, 15 responses)
+
+| Format | On disk | Read and parse | Exact? |
+|---|---|---|---|
+| `jsonb` | 6.32 MB | 1.25 s | 0 of 15 |
+| `jsonb` with lz4 | 3.58 MB | 1.01 s | 0 of 15 |
+| **gzip `bytea`** | **1.84 MB** | 0.44 s | 15 of 15 |
+
+Chosen: gzip `bytea` (decision 005, migration `002`).
+
+### Tests
+
+- **208 passed** (`ruff` and `mypy --strict` clean).
+- **Rules covered:** a first sighting isn't a change; an undated event getting a date is a change; an unchanged rerun gives 0 changes; a repeat change within one run updates that run's row (or removes it if the field ends where it started).
+- **Ingest:** quota stop gives `partial`; crash gives `failed`, then a clean rerun; a held lock exits quietly.
+- **Rebuild:** `--verify` reports a tampered row and leaves it alone; after pruning, rows without raw are left alone and reported.
+- **Run time:** against Neon, `test_ingest.py` takes about 4 minutes and `test_rebuild.py` about 7.5 minutes, because of network round trips. CI (local Postgres) runs the same suite in under a second.
+
+### Surprises
+
+1. **A failing test printed the dev-branch database password.**
+   - pytest shows fixture values when a test fails, and the `Schema` fixture's URL held the password.
+   - **Fixed** (`68c59e9`): `repr=False`, all test connections go through the scrubbing `db.connect`, and a check proves a failing test no longer prints the URL (it fails without the fix).
+   - **Action for you:** rotate the `neondb_owner` password. Neon branches usually inherit role passwords, so production may share it.
+2. **The undated-event onsale rule nulled a real date.**
+   - A postponed TBA show's onsale was 2024-07-26, more than 2 years before the run, so `too_early` nulled it.
+   - It was genuine: the show went on sale in 2024 and was later postponed. It has no `initialStartDate`.
+   - Among the 19 undated events, onsale years are 1900, 2024, 2025 and 2026. 9 of the 19 carry `initialStartDate`.
+   - **The rule needs your decision.**
+3. **The 1900 placeholder count rose,** from 235 (Phase 0) to 239.
+4. **No real changes appeared between the two runs** (seconds apart), as expected. Change detection is proven by tests, not yet by live data.
+
+---
+
 ## 2026-10-06: Phase 3 follow-up, splitting proven on the real API
 
 `fetch-windows` gained `--split-threshold N` (default 1,000). It ran once for real at **N = 100**, so that ordinary weeks had to split.
