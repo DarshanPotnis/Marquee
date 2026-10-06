@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from marquee.config import ConfigError, load_settings, read_environment, settings_from_environment
+from marquee.config import (
+    ConfigError,
+    load_settings,
+    load_test_database_url,
+    read_environment,
+    settings_from_environment,
+)
 
 DB_URL = "postgresql://marquee:s3cret-pw@db.example.test/marquee"
 ELSEWHERE_URLS = [
@@ -210,8 +216,73 @@ def test_settings_ignore_a_clash_on_a_variable_they_do_not_read(
     tmp_path: Path, clean_env: pytest.MonkeyPatch
 ) -> None:
     dotenv = tmp_path / ".env"
-    dotenv.write_text(
-        f"MARQUEE_DATABASE_URL={DB_URL}\nMARQUEE_TEST_DATABASE_URL=postgresql://t@h/test\n"
-    )
-    clean_env.setenv("MARQUEE_TEST_DATABASE_URL", "postgresql://t@h/other")
+    dotenv.write_text(f"MARQUEE_DATABASE_URL={DB_URL}\nOTHER_PROJECT_SETTING=a\n")
+    clean_env.setenv("OTHER_PROJECT_SETTING", "b")
     assert settings_from_environment(dotenv).database_url == DB_URL
+
+
+# --- Guards: tests can never touch production, and advisory locks always get a direct connection.
+
+PROD = (
+    "postgresql://app:s3cret-pw@ep-prod-111111.us-east-2.aws.neon.tech/neondb"
+    "?sslmode=require&channel_binding=require"
+)
+TEST = "postgresql://app:t3st-pw@ep-dev-222222.us-east-2.aws.neon.tech/neondb?sslmode=require"
+POOLED = "postgresql://app:s3cret-pw@ep-prod-111111-pooler.us-east-2.aws.neon.tech/neondb"
+
+
+def test_a_test_database_url_equal_to_production_is_refused_by_the_app() -> None:
+    with pytest.raises(ConfigError, match="MARQUEE_TEST_DATABASE_URL") as err:
+        load_settings({"MARQUEE_DATABASE_URL": PROD, "MARQUEE_TEST_DATABASE_URL": PROD})
+    assert "MARQUEE_DATABASE_URL" in str(err.value)
+    assert "s3cret-pw" not in str(err.value)
+
+
+def test_a_test_database_url_equal_to_production_is_refused_by_the_tests() -> None:
+    with pytest.raises(ConfigError, match="MARQUEE_TEST_DATABASE_URL") as err:
+        load_test_database_url({"MARQUEE_DATABASE_URL": PROD, "MARQUEE_TEST_DATABASE_URL": PROD})
+    assert "s3cret-pw" not in str(err.value)
+
+
+def test_the_same_database_written_differently_is_still_refused() -> None:
+    # Same host (any case), default port spelled out, same database; other user, reordered params.
+    same_db = (
+        "postgresql://someone_else:x@EP-PROD-111111.us-east-2.aws.neon.tech:5432/neondb"
+        "?channel_binding=require&sslmode=require"
+    )
+    with pytest.raises(ConfigError, match="MARQUEE_TEST_DATABASE_URL"):
+        load_test_database_url({"MARQUEE_DATABASE_URL": PROD, "MARQUEE_TEST_DATABASE_URL": same_db})
+    with pytest.raises(ConfigError, match="MARQUEE_TEST_DATABASE_URL"):
+        load_settings({"MARQUEE_DATABASE_URL": PROD, "MARQUEE_TEST_DATABASE_URL": same_db})
+
+
+def test_a_separate_test_database_is_accepted() -> None:
+    env = {"MARQUEE_DATABASE_URL": PROD, "MARQUEE_TEST_DATABASE_URL": TEST}
+    assert load_settings(env).database_url == PROD
+    assert load_test_database_url(env) == TEST
+
+
+def test_the_test_database_works_without_production_configured() -> None:
+    # CI sets only the test URL.
+    assert load_test_database_url({"MARQUEE_TEST_DATABASE_URL": TEST}) == TEST
+
+
+def test_an_unset_test_database_url_is_none() -> None:
+    assert load_test_database_url({"MARQUEE_DATABASE_URL": PROD}) is None
+
+
+def test_a_pooled_production_url_is_refused() -> None:
+    with pytest.raises(ConfigError, match="MARQUEE_DATABASE_URL.*pooler") as err:
+        load_settings({"MARQUEE_DATABASE_URL": POOLED})
+    assert "s3cret-pw" not in str(err.value)
+
+
+def test_a_pooled_test_url_is_refused() -> None:
+    with pytest.raises(ConfigError, match="MARQUEE_TEST_DATABASE_URL.*pooler") as err:
+        load_test_database_url({"MARQUEE_TEST_DATABASE_URL": POOLED})
+    assert "s3cret-pw" not in str(err.value)
+
+
+def test_a_non_postgres_test_url_is_refused() -> None:
+    with pytest.raises(ConfigError, match="MARQUEE_TEST_DATABASE_URL"):
+        load_test_database_url({"MARQUEE_TEST_DATABASE_URL": "jdbc:postgresql://localhost/x"})

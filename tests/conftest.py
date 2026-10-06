@@ -10,17 +10,17 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from marquee.config import read_environment
+from marquee.config import load_test_database_url, read_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _test_database_url() -> str | None:
-    # Same rule as the app: if the shell and .env disagree, fail rather than guess.
-    url = read_environment(ROOT / ".env", names=["MARQUEE_TEST_DATABASE_URL"]).get(
-        "MARQUEE_TEST_DATABASE_URL"
-    )
-    return (url or "").strip() or None
+    # Same rules as the app: a shell/.env clash, a pooled host or the production DB all fail.
+    # Also reads the production URL, only to refuse a test URL that points at the same database.
+    names = ["MARQUEE_TEST_DATABASE_URL", "MARQUEE_DATABASE_URL"]
+    env = read_environment(ROOT / ".env", names=names)
+    return load_test_database_url(env)
 
 
 @pytest.fixture(scope="session")
