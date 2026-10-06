@@ -250,10 +250,24 @@ Record the math in decision record 003. Running out of storage is a silent failu
 ## 6. HTTP client rules (`tm_client.py`)
 
 - **Pace:** at least 250 ms between requests (4 per second; the limit is 5).
-- **Retry only safe failures:** timeouts, connection errors, 429 and 5xx. Use exponential backoff with jitter, honor `Retry-After` if present, and give up after 5 tries.
-- **Fail fast:** 400, 401 and 403 mean it's our bug or our key. Retrying only burns quota.
-- **Budget guard:** read `Rate-Limit-Available`. If it falls below a reserve (default 200), stop cleanly and mark the run `partial`.
-- **Never leak the key:** strip `apikey` from saved params, logs and exception messages. Test this.
+- **Retry only safe failures:**
+  - Which failures: timeouts, connection errors, 429 throttles, 5xx, and a 200 whose body isn't JSON or has no `page` object. That last one is usually a passing glitch, and it must never reach the transform as data.
+  - How: exponential backoff with jitter (1, 2, 4, 8 s, each times a random factor of 0.5–1), and give up after 5 attempts.
+  - `Retry-After` is honoured up to 60 s. A longer wait gives up and leaves the work to the next scheduled run.
+- **Two kinds of 429:**
+  - **Daily quota gone** (`policies.ratelimit.QuotaViolation`): stop cleanly, like the budget guard. Retrying only burns attempts until the reset.
+  - **Per-second throttle** (`policies.ratelimit.SpikeArrestViolation`): retry.
+  - **No code we recognise:** stop if the remaining-budget estimate is 10 or less, otherwise retry.
+  - The codes and their sources are in `docs/api-notes.md` §10.
+- **Fail fast:** any other 4xx (400, 401, 403) means it's our bug or our key. Retrying only burns quota.
+- **Budget guard:**
+  - The estimate is the last `Rate-Limit-Available`, minus every call sent since. Phase 0 showed that 400s cost quota but carry no rate-limit headers.
+  - Never send a call while the estimate is at or below the reserve (default 200). Stop cleanly and mark the run `partial`.
+- **Timeouts:** named and set in one place: connect 5 s, read 30 s, write 5 s, pool 5 s. Not httpx's defaults.
+- **Never leak the key:** strip `apikey` from saved params, logs and exception messages, and test it.
+  - httpx logs every request URL at INFO, so the `httpx` and `httpcore` loggers are held at WARNING.
+  - Ticketmaster's documented quota 429 repeats the key in its body, so error text is redacted.
+  - httpx's own exceptions hold the URL, so none is ever chained to ours.
 - **Testable:** inject the HTTP transport (`httpx.MockTransport`), the clock and the sleep function. No real network calls in unit tests.
 
 ---

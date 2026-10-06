@@ -116,6 +116,7 @@ Of 1,200 events returned by `classificationName=music`, the primary segment was:
 
 - **Response metadata:** `page.number` (zero-based), `page.size`, `page.totalElements`, `page.totalPages`. `totalPages` equals ceil(total / size).
 - **Links:** `_links.first`, `.self`, `.next` and `.last` hold relative URLs that echo our parameters without `apikey`.
+- **Empty result:** `{"_links": …, "page": {"size": 200, "totalElements": 0, "totalPages": 0, "number": 0}}`. There's no `_embedded` and `totalPages` is **0**, so a paging loop must not assume at least one page.
 - **Size:** 200 works. 201 and 500 return:
   ```json
   {"errors":[{"_links":{"about":{"href":"/discovery/v2/errors.html#DIS1036"}},"code":"DIS1036","detail":"Query param \"size\" must be less than 200","status":"400 BAD_REQUEST"}]}
@@ -267,6 +268,30 @@ There are two different shapes:
 
 - **No rate-limit headers** on any 400 or 401 response.
 - **Not observed:** 403, 404, 429, 5xx, `Retry-After`.
+
+### 429 codes the client relies on
+
+Neither 429 code has been observed: we have never received a 429.
+
+| Fault code (`fault.detail.errorcode`) | Meaning | Client action | Source | Observed? |
+|---|---|---|---|---|
+| `policies.ratelimit.QuotaViolation` | Daily quota (5,000) used up | Stop the run cleanly (`BudgetExhausted`) | **Documented** by Ticketmaster (Getting Started → Rate Limits), with the example body below | No |
+| `policies.ratelimit.SpikeArrestViolation` | Per-second limit hit | Retry with backoff | **Documented** by Apigee, the gateway behind the API. Not in Ticketmaster's docs. | No |
+| no code, or one we don't recognise | Unknown | Stop if the budget estimate is 10 or less (or the 429 itself reports `Rate-Limit-Available` ≤ 10); otherwise retry | our rule | — |
+| `oauth.v2.InvalidApiKey` (401) | Bad key | Fail fast | Documented and **observed** (§10, item 2) | Yes |
+
+Ticketmaster's documented quota body **contains the API key**:
+
+```json
+{"fault": {"faultstring": "Rate limit quota violation. Quota limit exceeded. Identifier : {apikey}", "detail": {"errorcode": "policies.ratelimit.QuotaViolation"}}}
+```
+
+So error text from any response is redacted before it goes into a message or a log.
+
+Sources:
+- [Ticketmaster Getting Started](https://developer.ticketmaster.com/products-and-docs/apis/getting-started/)
+- [Apigee community: SpikeArrest error code](https://community.apigee.com/gc/Apigee/Error-code-that-Spike-arrest-policy-returns-by-Apigee/m-p/26640)
+- [Apigee: Add the SpikeArrest policy](https://docs.cloud.google.com/apigee/docs/api-platform/tutorials/add-spike-arrest)
 
 ## 11. Is the API key in responses?
 

@@ -4,6 +4,41 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 2, HTTP client
+
+### Done check
+
+| Check | Result |
+|---|---|
+| `ruff check` | clean |
+| `mypy` (strict) | clean, 5 files |
+| `pytest` | **99 passed** (34 of them client tests) |
+| Breakage test | Five client behaviours were broken one at a time. Each made its tests fail, and restoring the code made them pass. The five: httpx's request logging no longer muted; a quota 429 retried; an unusable 200 accepted; httpx's default timeouts used; error responses not counted against the budget. |
+| One real call through the client (final query, `size=1`) | HTTP 200. `totalElements` 1,280. `Rate-Limit-Available` went from 4,878 to 4,877. Quota resets at 2026-10-07T15:06:53.158Z. With logging at DEBUG, neither the key nor the text "apikey" appeared anywhere, and the saved params are key-free. |
+
+### PLAN §6 coverage
+
+PLAN §6's test list is all covered:
+- 429 then success.
+- 401 fails with no retry.
+- Five 500s give up.
+- Requests are paced at least 250 ms apart.
+- The budget guard stops cleanly.
+- The key is never in params, logs or errors.
+
+Also covered: quota versus throttle 429s; named timeouts; unusable 200s retried within the same 5-attempt limit; `Retry-After` capped at 60 s.
+
+### Surprises
+
+1. **Ticketmaster's documented quota-exceeded 429 contains the API key** (`"Identifier : {apikey}"`). Error text is now redacted before it reaches any message or log, and there's a test for exactly that body.
+2. **Neither 429 code has been observed.**
+   - `QuotaViolation` is documented by Ticketmaster.
+   - `SpikeArrestViolation` is documented only by Apigee, the gateway Ticketmaster runs on.
+   - The fallback (an unlabelled 429 with the budget estimate at 10 or less means quota) covers us if either code differs in practice.
+3. **`totalElements` drifted from 1,276 to 1,280 in about 4 hours.** The demo number is a snapshot, which is why each run records its own count.
+
+---
+
 ## 2026-10-06: Config guards
 
 Two guards, test-first. The full suite has 65 passing tests, and your real `.env` passes both guards.
