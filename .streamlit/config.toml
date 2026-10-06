@@ -1,0 +1,7 @@
+# One accent colour; red and amber are reserved for problems (and always come with a word).
+[theme]
+base = "light"
+primaryColor = "#2563EB"
+
+[browser]
+gatherUsageStats = false
