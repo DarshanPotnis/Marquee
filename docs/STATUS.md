@@ -4,6 +4,15 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Config guards
+
+Two guards, test-first. The full suite has 65 passing tests, and your real `.env` passes both guards.
+
+1. **Tests can never touch production.** A `MARQUEE_TEST_DATABASE_URL` that points at the same database as `MARQUEE_DATABASE_URL` is refused, by both the app and the test fixture. "Same" means the same host (in any letter case), port and database name, so a different username or a reordered query string doesn't get past it.
+2. **Locks always get a direct connection.** Any database URL whose host contains `-pooler` is refused. Session-level advisory locks don't hold through Neon's connection pooler.
+
+---
+
 ## 2026-10-06: Phase 1 amendment, Marquee's own database variable names
 
 `~/.zshrc` keeps its generic `DATABASE_URL` because other projects need it. Marquee now reads only `MARQUEE_DATABASE_URL` and `MARQUEE_TEST_DATABASE_URL`, and never the generic names. The clash rule still applies to the `MARQUEE_` names. Tests cover three cases:
