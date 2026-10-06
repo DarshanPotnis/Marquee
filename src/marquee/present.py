@@ -7,7 +7,7 @@ page reads correctly in a screenshot, in greyscale, or for someone colour-blind.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 LA = ZoneInfo("America/Los_Angeles")
@@ -15,6 +15,7 @@ SCOPE_LABEL = ("Ticketmaster LA market (DMA 324) · Music · next 90 days · "
                "face-value data, no resale prices")
 FRESH_INTERVALS = 1.5  # under 1.5 schedule intervals since the last good run: fresh
 LATE_INTERVALS = 3  # under 3: late; beyond: stale
+MISSING = "—"
 
 
 @dataclass(frozen=True)
@@ -27,10 +28,24 @@ def number(value: int | float | None) -> str:
     return "-" if value is None else f"{value:,.0f}"
 
 
-def la_time(instant: datetime) -> str:
-    """'Oct 6, 1:19 PM PDT'. The zone is shown because 1:30 AM happens twice on Nov 1."""
+def la_time(instant: datetime, today: date | None = None) -> str:
+    """'Oct 6, 1:19 PM PDT'. The zone is shown because 1:30 AM happens twice on Nov 1.
+    Given today, a time in another year says so: 'Jul 26, 2024, 10:00 AM PDT'."""
     local = instant.astimezone(LA)
-    return f"{local:%b} {local.day}, {_clock(local.time())} {local:%Z}"
+    year = "" if today is None or local.year == today.year else f", {local.year}"
+    return f"{local:%b} {local.day}{year}, {_clock(local.time())} {local:%Z}"
+
+
+def event_date(day: date | None, today: date) -> str:
+    """'Tue Oct 6'; 'Sun Jan 3, 2027' outside this year, so a date never reads as the wrong one."""
+    if day is None:
+        return "TBA"
+    text = f"{day:%a %b} {day.day}"
+    return text if day.year == today.year else f"{text}, {day.year}"
+
+
+def onsale(instant: datetime | None, today: date) -> str:
+    return MISSING if instant is None else la_time(instant, today)
 
 
 def la_date(day: date | None) -> str:
@@ -118,4 +133,77 @@ def field_label(field: str) -> str:
 
 
 def megabytes(size: int) -> str:
-    return f"{size / 1024 ** 2:,.1f} MB"
+    mb = size / 1024 ** 2
+    return "<0.1 MB" if mb < 0.1 else f"{mb:,.1f} MB"  # "0.0 MB" would read as empty
+
+
+_CHECK_TITLES = {
+    "fetched_vs_reported": "Every page fully fetched",
+    "unique_vs_total": "Nothing missing vs the API's total",
+    "volume_vs_baseline": "Volume normal vs recent runs",
+    "window_over_cap": "No window over the API cap",
+    "events_without_venue": "Every event has a venue",
+    "venues_outside_ca": "Venues outside California",
+    "implausible_onsales": "Onsale dates plausible",
+}
+
+
+def check_title(name: str) -> str:
+    return _CHECK_TITLES.get(name, name)
+
+
+def if_it_fails(severity: str) -> str:
+    # An error makes ingest exit non-zero, so the scheduled run fails; a warning only shows here.
+    return "Run fails" if severity == "error" else "Warning only"
+
+
+PROBLEM_STATUSES = frozenset({"cancelled", "postponed", "rescheduled"})
+
+
+def is_problem_status(status: str | None) -> bool:
+    return status in PROBLEM_STATUSES
+
+
+def event_status(status: str | None) -> str:
+    if status is None:
+        return MISSING
+    return status.upper() if is_problem_status(status) else status
+
+
+# Real names carry these ("Nice as F**k", "[THE X : NEXUS]", "Loose Bricks | ..."). In st.table
+# every cell is Markdown, and Streamlit also reads $...$ as maths and :word[...] as a directive.
+_MARKDOWN = frozenset("\\`*_{}[]<>()#+-.!|~$:&")
+
+
+def md_escape(text: str) -> str:
+    """Backslash-escape Markdown punctuation so text from the API renders exactly as written."""
+    return "".join(f"\\{c}" if c in _MARKDOWN else c for c in text)
+
+
+def weeks_spanned(first_day: date, last_day: date) -> int:
+    """How many Monday-first weeks the days first_day..last_day touch."""
+    return (_monday(last_day) - _monday(first_day)).days // 7 + 1
+
+
+def partial_week(week: date, first_day: date, last_day: date) -> bool:
+    """True when first_day..last_day covers only some of the days of the week starting `week`."""
+    return week < first_day or week + timedelta(days=6) > last_day
+
+
+def week_label(week: date, first_day: date, last_day: date) -> str:
+    """'Oct 5', or 'Oct 5 (partial)', so a short bar is never mistaken for a quiet week."""
+    partial = partial_week(week, first_day, last_day)
+    return f"{week:%b} {week.day}" + (" (partial)" if partial else "")
+
+
+def weekly_caption(first_day: date, last_day: date) -> str:
+    first = first_day.weekday() != 0  # the range starts after that week's Monday
+    last = last_day.weekday() != 6  # ...or ends before that week's Sunday
+    ending = {(True, True): ", and the first and last weeks are partial.",
+              (True, False): ", and the first week is partial.",
+              (False, True): ", and the last week is partial."}.get((first, last), ".")
+    return "Later weeks are naturally lower: shows further out are announced later" + ending
+
+
+def _monday(day: date) -> date:
+    return day - timedelta(days=day.weekday())
