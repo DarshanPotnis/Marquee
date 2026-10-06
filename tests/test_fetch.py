@@ -7,7 +7,7 @@ import pytest
 from fake_discovery import FakeDiscovery, FakeEvent, client_for, spread
 
 from marquee.fetch import BASE_QUERY, CAP, PAGE_SIZE, RangeResult, fetch_range, fetch_window
-from marquee.tm_client import ApiError
+from marquee.tm_client import ApiError, Page
 from marquee.windows import Window, api_time, local_midnight, plan_range, plan_windows, split
 
 NOW = datetime(2026, 10, 6, 15, 22, 49, tzinfo=UTC)
@@ -155,3 +155,30 @@ def test_a_lower_split_threshold_splits_ordinary_weeks() -> None:
     assert r.over_cap == []  # over_cap is about the API's paging cap, not the split threshold
     assert r.calls == len(api.requests)
     assert_covers_the_range(r)
+
+
+# --- Every page reaches on_page as it arrives, so ingest can save it straight away -------------
+
+def test_on_page_sees_every_page_in_request_order_probes_included() -> None:
+    api = FakeDiscovery(spread(2000, WHOLE.start, WHOLE.end))
+    seen: list[tuple[Window | None, str]] = []
+
+    def record(window: Window | None, page: Page) -> None:
+        seen.append((window, page.params["startDateTime"] + page.params["page"]))
+
+    r = fetch_range(client_for(api), BASE_QUERY, WINDOWS, split_threshold=100, on_page=record)
+    assert r.splits > 0
+    sent = [q.url.params["startDateTime"] + q.url.params["page"] for q in api.requests]
+    assert [s for _, s in seen] == sent
+    assert len(seen) == r.calls
+
+
+def test_an_undated_search_is_paged_without_a_date_filter() -> None:
+    seen: list[str] = []
+    api = FakeDiscovery(spread(450, WHOLE.start, WHOLE.end))
+    result = fetch_window(client_for(api), BASE_QUERY, None,
+                          on_page=lambda w, p: seen.append(p.params["page"]))
+    assert seen == ["0", "1", "2"]
+    assert result.window is None
+    assert all("startDateTime" not in q.url.params and "endDateTime" not in q.url.params
+               for q in api.requests)
