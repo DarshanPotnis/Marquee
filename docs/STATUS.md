@@ -4,6 +4,29 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 1 amendment, Marquee's own database variable names
+
+`~/.zshrc` keeps its generic `DATABASE_URL` because other projects need it. Marquee now reads only `MARQUEE_DATABASE_URL` and `MARQUEE_TEST_DATABASE_URL`, and never the generic names. The clash rule still applies to the `MARQUEE_` names. Tests cover three cases:
+
+- A shell `DATABASE_URL` pointing elsewhere (JDBC or a valid Postgres URL) is ignored completely.
+- A shell `DATABASE_URL` on its own is not used as a fallback.
+- A `MARQUEE_DATABASE_URL` set differently in the shell and in `.env` is refused.
+
+**Done check, rerun with the shell `DATABASE_URL` still exported and no `env -u`:**
+
+| Check | Result |
+|---|---|
+| `ruff check` | clean |
+| `mypy` (strict) | clean, 4 files |
+| `pytest` | 56 passed (integration tests against the Neon dev branch) |
+| `migrate` run 1 | `applied 0, already applied 1`, exit 0 |
+| `migrate` run 2 | `applied 0, already applied 1`, exit 0 |
+| Neon main | still 9 tables; `001_init.sql` hash unchanged (`1775fc9d8730`); 0 advisory locks held |
+
+Both runs apply 0 because `001_init.sql` was applied in the first done check. The `env -u DATABASE_URL` workaround in the entry below is no longer needed.
+
+---
+
 ## 2026-10-06: Phase 1, skeleton
 
 ### Done check
