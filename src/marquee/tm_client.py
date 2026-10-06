@@ -71,6 +71,7 @@ class Page:
     http_status: int
     body: dict[str, Any]
     rate_limit_available: int | None
+    raw: bytes  # the response body exactly as received (after undoing the transfer gzip)
 
 
 @dataclass(frozen=True)
@@ -160,7 +161,8 @@ class TicketmasterClient:
                 # Usually a passing glitch; it must never reach the transform as if it were data.
                 return _Retry("HTTP 200 with an unusable body (not JSON, or no page object)",
                               self._backoff(attempt))
-            return Page(params=params, http_status=200, body=body, rate_limit_available=available)
+            return Page(params=params, http_status=200, body=body, rate_limit_available=available,
+                        raw=resp.content)
         code, detail = _error_code_and_detail(resp)
         if resp.status_code == 429 and self._quota_is_gone(code):
             resets = self.quota_resets_at.isoformat() if self.quota_resets_at else "unknown"
