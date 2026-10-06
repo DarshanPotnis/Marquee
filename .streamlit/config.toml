@@ -5,3 +5,7 @@ primaryColor = "#2563EB"
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# "viewer" hides the developer options: the Deploy button, rerun and clear cache.
+toolbarMode = "viewer"
