@@ -369,3 +369,16 @@ def test_the_checks_command_reports_a_run(
         assert cli.main(["checks"]) == 0
     assert "run 1: 7 checks, 0 failed, 0 warnings" in caplog.text
     assert "unique_vs_total: passed (error)" in caplog.text
+
+
+def test_a_run_records_the_range_it_covered_from_the_moment_it_opens(migrated: Schema) -> None:
+    # The dashboard tells a newly listed show from one that just entered the moving 90-day window
+    # by comparing with the previous run's range, so every run keeps its own, even a failed one.
+    api = FakeDiscovery(spread(20, WHOLE.start, WHOLE.end))
+    run(migrated, api)
+    api.failures = {n: lambda: httpx.Response(500) for n in range(len(api.requests) + 1,
+                                                                  len(api.requests) + 30)}
+    run(migrated, api)
+    assert query(migrated, "SELECT status, range_start, range_end FROM ingest_runs"
+                           " ORDER BY run_id") == [("succeeded", WHOLE.start, WHOLE.end),
+                                                   ("failed", WHOLE.start, WHOLE.end)]

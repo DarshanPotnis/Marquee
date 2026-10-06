@@ -198,3 +198,22 @@ def test_storage_lists_the_tables_and_the_database_size(loaded: Schema) -> None:
     assert {"events", "raw_responses", "venues"} <= set(names)
     assert s.database_bytes >= sum(size for _, size in s.tables)
     assert s.limit_bytes is None  # only Neon has neon.max_cluster_size
+
+
+def test_new_shows_say_whether_they_were_newly_listed_or_only_entered_the_window(
+    migrated: Schema,
+) -> None:
+    # Run 1 covers Oct 6 to Jan 3 (LA). A day later, run 2 covers Oct 7 to Jan 4, so a Jan 4 show
+    # appears for the first time without having just been listed.
+    later = NOW + timedelta(days=1)
+    jan4 = FakeEvent("evtJAN4", datetime(2027, 1, 5, 4, tzinfo=UTC))  # Mon Jan 4, 8 PM PT
+    api = FakeDiscovery(spread(30, WHOLE.start, WHOLE.end) + [jan4])
+    with migrated.connect() as conn:
+        ingest(conn, client_for(api), now=NOW)
+        api.events += [FakeEvent("evtFRESH", datetime(2026, 10, 21, 3, tzinfo=UTC)),
+                       FakeEvent("tbaFRESH", None, status="postponed")]
+        ingest(conn, client_for(api), now=later)
+    with readonly(migrated) as conn:
+        shows = queries.new_shows(conn, datetime.now(UTC) - timedelta(days=1))
+    assert sorted((s.show, s.entered) for s in shows) == [
+        ("Synthetic evtFRESH", False), ("Synthetic evtJAN4", True), ("Synthetic tbaFRESH", False)]

@@ -1,7 +1,7 @@
 """Change detection between the stored event and the freshly transformed one. Pure: no I/O."""
 
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -104,3 +104,33 @@ def test_a_repeat_change_back_to_the_start_leaves_no_change() -> None:
 def test_fold_refuses_changes_to_different_fields() -> None:
     with pytest.raises(ValueError):
         fold(Change("status", "a", "b"), Change("venue", "b", "c"))
+
+
+# --- New shows: newly listed, or only just inside the moving 90-day window ------------------------
+
+# The previous complete run's range ended at LA midnight starting Mon Jan 4, 2027 (08:00 UTC).
+PREVIOUS_END = datetime(2027, 1, 4, 8, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("starts_at", "local_date", "entered"),
+    [
+        (datetime(2027, 1, 4, 5, tzinfo=UTC), date(2027, 1, 3), False),  # Sun 9 PM PT: was inside
+        (PREVIOUS_END, date(2027, 1, 4), False),  # exactly on the edge: the API includes edges
+        (PREVIOUS_END + timedelta(seconds=1), date(2027, 1, 4), True),
+        (datetime(2027, 1, 5, 4, tzinfo=UTC), date(2027, 1, 4), True),  # Mon 8 PM PT
+        (None, date(2027, 1, 3), False),  # no specific time: judged by its date
+        (None, date(2027, 1, 4), True),
+        (None, None, False),  # undated (TBA/TBD): always newly listed
+    ],
+)
+def test_a_show_entered_the_window_only_if_it_lay_beyond_the_previous_range(
+    starts_at: datetime | None, local_date: date | None, entered: bool
+) -> None:
+    from marquee.changes import entered_window
+    assert entered_window(starts_at, local_date, PREVIOUS_END) is entered
+
+
+def test_without_a_previous_range_a_show_counts_as_newly_listed() -> None:
+    from marquee.changes import entered_window
+    assert entered_window(datetime(2027, 1, 5, 4, tzinfo=UTC), date(2027, 1, 4), None) is False

@@ -262,3 +262,19 @@ def test_the_weekly_caption_names_only_the_weeks_that_are_partial(first: date, l
 def test_sizes_under_a_tenth_of_a_megabyte(size: int, text: str) -> None:
     from marquee.present import megabytes
     assert megabytes(size) == text
+
+
+@pytest.mark.parametrize(
+    ("dates", "text"),
+    [([], "Entered the 90-day window: none in the last 24 hours."),
+     ([date(2027, 1, 4)], "Entered the 90-day window: 1 show (Mon Jan 4, 2027), in range only "
+                          "because the window moved forward."),
+     ([date(2027, 1, 4)] * 14, "Entered the 90-day window: 14 shows (Mon Jan 4, 2027), in range "
+                               "only because the window moved forward."),
+     ([date(2027, 1, 5), date(2027, 1, 4)], "Entered the 90-day window: 2 shows (Mon Jan 4, 2027 "
+                                            "to Tue Jan 5, 2027), in range only because the "
+                                            "window moved forward.")],
+)
+def test_shows_that_only_entered_the_window_are_a_count(dates: list[date], text: str) -> None:
+    from marquee.present import entered_caption
+    assert entered_caption(dates, TODAY) == text

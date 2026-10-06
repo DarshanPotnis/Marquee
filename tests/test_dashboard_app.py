@@ -7,7 +7,7 @@ describes and don't depend on the date they run.
 import json
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +93,8 @@ def test_an_empty_database_renders_every_empty_state(migrated: Schema,
     assert "NO RUNS YET" in t
     assert "No runs yet. Run `python -m marquee ingest`." in t
     assert "No checks yet." in t
-    assert "No new shows in the last 24 hours." in t
+    assert "No newly listed shows in the last 24 hours." in t
+    assert "Entered the 90-day window: none in the last 24 hours." in t
     assert "No changes in the last 24 hours." in t
     assert "No public onsales in the next 7 days." in t
     assert "No events match these filters." in t
@@ -245,3 +246,19 @@ def test_weeks_are_labelled_categories_with_partial_weeks_marked(
     assert sum(w["Events"] for w in weeks) == 60
     assert ("Later weeks are naturally lower: shows further out are announced later, "
             "and the first week is partial.") in text(at)
+
+
+def test_shows_that_only_entered_the_window_are_counted_apart_from_newly_listed_ones(
+    migrated: Schema, render: Callable[[Schema], AppTest]
+) -> None:
+    api = FakeDiscovery(spread(30, WHOLE.start, WHOLE.end)
+                        + [FakeEvent("evtJAN4", datetime(2027, 1, 5, 4, tzinfo=UTC))])
+    ingest_with(migrated, api)
+    api.events.append(FakeEvent("evtFRESH", datetime(2026, 10, 21, 3, tzinfo=UTC)))
+    with migrated.connect() as conn:
+        ingest(conn, client_for(api), now=NOW + timedelta(days=1))  # the window moves a day
+    at = render(migrated)
+    assert "**Newly listed**" in [m.value for m in at.markdown]
+    assert list(table_with(at, "First seen")["Show"]) == ["Synthetic evtFRESH"]
+    assert ("Entered the 90-day window: 1 show (Mon Jan 4, 2027), in range only because the "
+            "window moved forward.") in text(at)

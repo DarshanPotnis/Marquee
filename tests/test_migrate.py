@@ -4,6 +4,7 @@ Uses MARQUEE_TEST_DATABASE_URL and skips cleanly without it. Each test gets a th
 """
 
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -14,7 +15,7 @@ import marquee.__main__ as cli
 from marquee import db
 from marquee.__main__ import main
 from marquee.config import load_settings
-from marquee.db import MIGRATE_LOCK, LockHeld, MigrationError, migrate
+from marquee.db import MIGRATE_LOCK, MIGRATIONS_DIR, LockHeld, MigrationError, migrate
 from marquee.db import connect as direct_connect
 
 EXPECTED_TABLES = {
@@ -25,6 +26,7 @@ EXPECTED_TABLES = {
 
 MIGRATIONS = (
     "001_init.sql", "002_raw_gzip_and_run_counters.sql", "003_check_severity_and_prune.sql",
+    "004_run_range.sql",
 )
 
 
@@ -189,3 +191,28 @@ def test_003_adds_check_severity_and_run_counters(schema: Schema) -> None:
         conn.execute(insert, (run[0], "b", "warning"))
         with pytest.raises(psycopg.errors.CheckViolation):
             conn.execute(insert, (run[0], "c", "info"))
+
+
+def test_004_stores_each_runs_range_and_backfills_earlier_runs(
+    schema: Schema, tmp_path: Path
+) -> None:
+    # Runs from before 004 get the range plan_range gives for their start: from that second to
+    # the LA midnight that ends the 90th day, counting the LA day the run started on.
+    for m in MIGRATIONS[:3]:
+        (tmp_path / m).write_bytes((MIGRATIONS_DIR / m).read_bytes())
+    with schema.connect() as conn:
+        migrate(conn, tmp_path)
+        conn.execute("INSERT INTO ingest_runs (source, started_at) VALUES"
+                     " ('ticketmaster', '2026-10-06 20:19:07.835683+00'),"
+                     " ('ticketmaster', '2026-10-07 06:30:00+00')")  # still Oct 6 in LA
+        (tmp_path / MIGRATIONS[3]).write_bytes((MIGRATIONS_DIR / MIGRATIONS[3]).read_bytes())
+        assert migrate(conn, tmp_path).applied == (MIGRATIONS[3],)
+        cols = columns(conn, "ingest_runs")
+        assert (cols["range_start"], cols["range_end"]) == \
+            ("timestamp with time zone", "timestamp with time zone")
+        rows = conn.execute("SELECT range_start, range_end FROM ingest_runs ORDER BY run_id"
+                            ).fetchall()
+    assert rows == [
+        (datetime(2026, 10, 6, 20, 19, 7, tzinfo=UTC), datetime(2027, 1, 4, 8, tzinfo=UTC)),
+        (datetime(2026, 10, 7, 6, 30, tzinfo=UTC), datetime(2027, 1, 4, 8, tzinfo=UTC)),
+    ]
