@@ -23,7 +23,9 @@ EXPECTED_TABLES = {
 }
 
 
-MIGRATIONS = ("001_init.sql", "002_raw_gzip_and_run_counters.sql")
+MIGRATIONS = (
+    "001_init.sql", "002_raw_gzip_and_run_counters.sql", "003_check_severity_and_prune.sql",
+)
 
 
 def tables(conn: psycopg.Connection) -> set[str]:
@@ -121,8 +123,9 @@ def test_cli_migrate_runs_twice_cleanly(
     with caplog.at_level(logging.INFO):
         assert main(["migrate"]) == 0
         assert main(["migrate"]) == 0
-    assert f"applied 2 ({', '.join(MIGRATIONS)}), already applied 0" in caplog.text
-    assert "applied 0, already applied 2" in caplog.text
+    n = len(MIGRATIONS)
+    assert f"applied {n} ({', '.join(MIGRATIONS)}), already applied 0" in caplog.text
+    assert f"applied 0, already applied {n}" in caplog.text
 
 
 def test_cli_exits_with_a_clear_message_while_the_lock_is_held(
@@ -169,3 +172,20 @@ def test_002_adds_the_run_counters(schema: Schema) -> None:
                                       "onsale_nulled")} == \
             {"probe_calls": "integer", "probe_events": "integer", "undated_events": "integer",
              "onsale_nulled": "jsonb"}
+
+
+def test_003_adds_check_severity_and_run_counters(schema: Schema) -> None:
+    with schema.connect() as conn:
+        migrate(conn)
+        assert columns(conn, "check_results")["severity"] == "text"
+        cols = columns(conn, "ingest_runs")
+        assert (cols["checks_failed"], cols["pruned_raw"]) == ("integer", "integer")
+        run = conn.execute("INSERT INTO ingest_runs (source) VALUES ('ticketmaster')"
+                           " RETURNING run_id").fetchone()
+        assert run is not None
+        insert = ("INSERT INTO check_results (run_id, check_name, passed, severity)"
+                  " VALUES (%s, %s, true, %s)")
+        conn.execute(insert, (run[0], "a", "error"))
+        conn.execute(insert, (run[0], "b", "warning"))
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(insert, (run[0], "c", "info"))
