@@ -17,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _test_database_url() -> str | None:
     # Same rule as the app: if the shell and .env disagree, fail rather than guess.
-    url = read_environment(ROOT / ".env").get("TEST_DATABASE_URL")
+    url = read_environment(ROOT / ".env", names=["TEST_DATABASE_URL"]).get(
+        "TEST_DATABASE_URL"
+    )
     return (url or "").strip() or None
 
 

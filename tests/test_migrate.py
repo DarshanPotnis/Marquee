@@ -10,8 +10,10 @@ import psycopg
 import pytest
 from conftest import Schema
 
+import marquee.__main__ as cli
 from marquee import db
 from marquee.__main__ import main
+from marquee.config import load_settings
 from marquee.db import MIGRATE_LOCK, LockHeld, MigrationError, migrate
 
 EXPECTED_TABLES = {
@@ -31,6 +33,15 @@ def hold_migrate_lock(schema: Schema) -> psycopg.Connection:
     holder = psycopg.connect(schema.url, autocommit=True)
     holder.execute("SELECT pg_advisory_lock(%s)", (MIGRATE_LOCK.key,))
     return holder
+
+
+def use_test_schema(schema: Schema, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hand the CLI its settings directly, so these tests never read the real .env (and its
+    # production DATABASE_URL), and point its connections at the throwaway schema.
+    monkeypatch.setattr(
+        cli, "settings_from_environment", lambda: load_settings({"DATABASE_URL": schema.url})
+    )
+    monkeypatch.setattr(db, "connect", lambda url: schema.connect())
 
 
 def test_fresh_migrate_creates_every_table(schema: Schema) -> None:
@@ -103,8 +114,7 @@ def test_migrate_refuses_to_run_while_another_session_holds_the_lock(schema: Sch
 def test_cli_migrate_runs_twice_cleanly(
     schema: Schema, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("DATABASE_URL", schema.url)
-    monkeypatch.setattr(db, "connect", lambda url: schema.connect())
+    use_test_schema(schema, monkeypatch)
     with caplog.at_level(logging.INFO):
         assert main(["migrate"]) == 0
         assert main(["migrate"]) == 0
@@ -115,8 +125,7 @@ def test_cli_migrate_runs_twice_cleanly(
 def test_cli_exits_with_a_clear_message_while_the_lock_is_held(
     schema: Schema, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("DATABASE_URL", schema.url)
-    monkeypatch.setattr(db, "connect", lambda url: schema.connect())
+    use_test_schema(schema, monkeypatch)
     with hold_migrate_lock(schema), caplog.at_level(logging.INFO):
         assert main(["migrate"]) == 1
     assert "marquee.migrate" in caplog.text

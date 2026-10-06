@@ -159,3 +159,22 @@ def test_read_environment_merges_without_clashes(
     env = read_environment(dotenv)
     assert env["TEST_DATABASE_URL"] == "postgresql://t@h/test"
     assert env["TM_API_KEY"] == "k"
+
+
+def test_clashes_outside_the_requested_names_are_ignored(
+    tmp_path: Path, clean_env: pytest.MonkeyPatch
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"DATABASE_URL={DB_URL}\nTEST_DATABASE_URL=postgresql://t@h/test\n")
+    clean_env.setenv("DATABASE_URL", "postgresql://other@elsewhere.test/otherdb")
+    env = read_environment(dotenv, names=["TEST_DATABASE_URL"])
+    assert env == {"TEST_DATABASE_URL": "postgresql://t@h/test"}
+
+
+def test_settings_ignore_a_clash_on_a_variable_they_do_not_read(
+    tmp_path: Path, clean_env: pytest.MonkeyPatch
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"DATABASE_URL={DB_URL}\nTEST_DATABASE_URL=postgresql://t@h/test\n")
+    clean_env.setenv("TEST_DATABASE_URL", "postgresql://t@h/other")
+    assert settings_from_environment(dotenv).database_url == DB_URL
