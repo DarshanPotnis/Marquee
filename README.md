@@ -17,7 +17,7 @@ Real numbers from production on 2026-10-06, Ticketmaster's LA market (DMA 324), 
 | **Raw storage per run** | **1.84 MB** as gzip of the exact bytes, against **6.32 MB** as `jsonb`, which isn't even byte-exact |
 | **One run** | 16 API calls (13 windows, 1 whole-range total, 2 undated calls), about 20 s |
 | **A day, hourly** | 384 calls (budget 2,500; quota 5,000) and about 131 MB of raw kept at 3-day retention (budget 500 MB of Neon's free 1 GB) |
-| **Rebuild from raw** | 0 API calls; `rebuild --verify` found 0 differences |
+| **Rebuild from raw** | 0 API calls; `rebuild --verify` found 0 differences while all raw was still retained (see Known issues) |
 | **Tests** | 390: unit tests, plus integration tests against Postgres 18, plus the Streamlit app run headless |
 | **Checks** | 7 after every run: 4 can fail the run, 3 are warnings |
 | **Scheduled runs on GitHub Actions** | run 6: _pending_ · run 7: _pending_ |
@@ -33,7 +33,7 @@ cp .env.example .env                    # then paste your key after TM_API_KEY=
 docker compose up -d --wait             # Postgres 18 on localhost:55432
 uv run python -m marquee migrate        # create the tables (uv installs Python 3.12 and the dependencies first)
 uv run python -m marquee ingest         # one real run: about 20 s and 16 API calls
-uv run streamlit run dashboard/app.py   # the dashboard, at http://localhost:8501
+uv run streamlit run dashboard/app.py   # the dashboard, at http://localhost:8501 (or the next free port)
 ```
 
 - **Run Streamlit from the repository root.** It reads its theme and toolbar settings from `.streamlit/config.toml` in the current folder.
@@ -98,7 +98,7 @@ They run after every complete run. Two counts may differ by up to max(2 events, 
 | Every page fully fetched (`fetched_vs_reported`) | Run fails | Each window returned the events it reported: paging bugs, dropped pages |
 | Nothing missing vs the API's total (`unique_vs_total`) | Run fails | Unique IDs across all windows equal the API's total for the whole range: gaps between windows |
 | No window over the API cap (`window_over_cap`) | Run fails | A day with more than 1,000 events, which we know we couldn't fetch |
-| Volume normal vs recent runs (`volume_vs_baseline`) | Run fails | Fewer than 70% of the typical count (the median of the last 7 good runs): a source quietly returning less |
+| Volume normal vs recent runs (`volume_vs_baseline`) | Run fails | Fewer than 70% of the typical count (the median of the last 7 succeeded runs): a source quietly returning less |
 | Every event has a venue (`events_without_venue`) | Warning only | Upstream data gaps |
 | Venues outside California (`venues_outside_ca`) | Warning only | Out-of-area venues in the LA market: 2 in Canada today |
 | Onsale dates plausible (`implausible_onsales`) | Warning only | Any onsale set aside for a reason other than Ticketmaster's known 1900 placeholder |
@@ -115,7 +115,7 @@ They run after every complete run. Two counts may differ by up to max(2 events, 
 
 Ticketmaster's terms of use say you may not "cache or store any Event Content other than for reasonable periods in order to provide the service you are providing" ([Licensed Uses and Restrictions](https://developer.ticketmaster.com/support/terms-of-use/)). So:
 
-- **Raw responses are kept for `RAW_RETENTION_DAYS` (3 days)** and pruned at the end of every run, never beyond 14 days. The latest good run's raw is always kept, so a rebuild is possible.
+- **Raw responses are kept for `RAW_RETENTION_DAYS` (3 days)** and pruned at the end of every run. The setting can't go above 14 days. Two exceptions, both listed under Known issues: the latest succeeded run's raw is kept however old, so a rebuild stays possible; and pruning runs inside `ingest`, so if runs stop, pruning stops too.
 - **Nothing real is committed.** Real sample responses live in `local/` (gitignored). Test fixtures and these screenshots are synthetic: the same shape, invented values.
 - **Personal and non-commercial.** If the dashboard is ever hosted, it stays private.
 
@@ -130,14 +130,26 @@ Ticketmaster's terms of use say you may not "cache or store any Event Content ot
 - **Only five fields are tracked as changes:** status, date, time, venue and public onsale. A renamed show just shows its new name.
 - **The Neon compute figure is an estimate:** 16–32 CU-hours a month of the free 100. Neon's console has the real number.
 
+## Known issues
+
+An independent review, by a reviewer who hadn't seen how the project was built, found these. Each was confirmed against the code, and none is fixed yet.
+
+1. **A run whose error-level checks failed still counts as `succeeded`.** So it joins the volume baseline and the dashboard's "last good run". After 4 bad runs in a row, a lasting drop becomes the new normal and the check goes green again.
+2. **One page the database refuses ends the whole run, and its raw is lost.** Raw and load share one transaction per page.
+3. **`rebuild` doesn't take the ingest lock.** Run it while no ingest is running, or a scheduled run's newer values can be overwritten with older ones.
+4. **`rebuild --verify` can't pass once raw has been pruned.** It compares `first_seen_run`, which pruned raw can't reproduce. So after 3 days it always reports differences.
+5. **The kept run has no age cap.** The latest succeeded run's raw is kept however old, and nothing prunes when runs stop.
+6. **A run killed mid-way, or one that loses its database connection, can stay `running` for good.** No problem word appears on the dashboard; GitHub still shows the red run.
+
 ## What I'd build next
 
-1. **A dead-man's switch.** An outside heartbeat that alerts when there's been no good run for 3 hours, because a disabled schedule never fails loudly.
-2. **A SELECT-only role and private hosting** for the dashboard.
-3. **Prune past events** from the clean tables some weeks after their date, to match the spirit of the retention rule.
-4. **Store a raw page only when its hash changes** ([decision 005](docs/decisions/005-raw-storage.md)), for a longer rebuild window in the same storage.
-5. **A second source** through `(source, source_id)`, with a mapping table to match the same show across marketplaces.
-6. **A daily digest of warnings,** so they don't depend on someone opening the dashboard.
+1. **Fix the known issues above,** with tests first: count only runs with no failed error checks as good, commit raw before loading, take the lock in rebuild, compare only what retained raw can reproduce, and cap the kept run at 14 days.
+2. **A dead-man's switch.** An outside heartbeat that alerts when there's been no good run for 3 hours, because a disabled schedule never fails loudly.
+3. **A SELECT-only role and private hosting** for the dashboard.
+4. **Prune past events** from the clean tables some weeks after their date, to match the spirit of the retention rule.
+5. **Store a raw page only when its hash changes** ([decision 005](docs/decisions/005-raw-storage.md)), for a longer rebuild window in the same storage.
+6. **A second source** through `(source, source_id)`, with a mapping table to match the same show across marketplaces.
+7. **A daily digest of warnings,** so they don't depend on someone opening the dashboard.
 
 ![Events per week as labelled categories, with the partial week fainter, then the checks in plain English and the last runs, including a PARTIAL one](docs/images/dashboard-health.png)
 
