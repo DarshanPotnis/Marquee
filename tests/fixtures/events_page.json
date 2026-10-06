@@ -1,0 +1,65 @@
+{
+  "_embedded": {
+    "events": [
+      {
+        "name": "Synthetic Band Live",
+        "type": "event",
+        "id": "vvSYNTH0000001",
+        "test": false,
+        "url": "https://www.ticketmaster.com/synthetic-band-live/event/0000SYNTHETIC0001",
+        "locale": "en-us",
+        "sales": {
+          "public": {
+            "startDateTime": "1900-01-01T18:00:00Z",
+            "startTBD": false,
+            "startTBA": false,
+            "endDateTime": "2026-11-02T04:00:00Z"
+          }
+        },
+        "dates": {
+          "start": {
+            "localDate": "2026-11-01",
+            "localTime": "20:00:00",
+            "dateTime": "2026-11-02T03:00:00Z",
+            "dateTBD": false,
+            "dateTBA": false,
+            "timeTBA": false,
+            "noSpecificTime": false
+          },
+          "timezone": "America/Los_Angeles",
+          "status": {"code": "onsale"},
+          "spanMultipleDays": false
+        },
+        "classifications": [
+          {
+            "primary": true,
+            "segment": {"id": "KZFzniwnSyZfZ7v7nJ", "name": "Music"},
+            "genre": {"id": "KnvZfZ7vAeA", "name": "Rock"}
+          }
+        ],
+        "_links": {"self": {"href": "/discovery/v2/events/vvSYNTH0000001?locale=en-us"}},
+        "_embedded": {
+          "venues": [
+            {
+              "name": "Synthetic Hall",
+              "type": "venue",
+              "id": "KovSYNTH001",
+              "timezone": "America/Los_Angeles",
+              "city": {"name": "Los Angeles"},
+              "state": {"name": "California", "stateCode": "CA"},
+              "country": {"name": "United States Of America", "countryCode": "US"},
+              "location": {"longitude": "-118.00000", "latitude": "34.00000"}
+            }
+          ],
+          "attractions": [
+            {"name": "Synthetic Band", "type": "attraction", "id": "K8vSYNTH001"}
+          ]
+        }
+      }
+    ]
+  },
+  "_links": {
+    "self": {"href": "/discovery/v2/events.json?dmaId=324&page=0&size=200&sort=id,asc"}
+  },
+  "page": {"size": 200, "totalElements": 1, "totalPages": 1, "number": 0}
+}
