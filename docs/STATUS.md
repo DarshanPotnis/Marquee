@@ -4,6 +4,52 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 3, windows
+
+### Before and after: same query, same range, run back to back
+
+| | |
+|---|---|
+| Query | Ticketmaster LA market (DMA 324), Music segment |
+| Range | `--start 2026-10-06T18:01:23Z` to `2027-01-04T08:00:00Z` |
+| Timing | the two commands ran 7 s apart |
+
+| | **Before:** `brute-force` (11:01:29 PDT) | **After:** `fetch-windows` (11:01:36 PDT) |
+|---|---|---|
+| API's reported total at that moment | **1,282** | **1,282** |
+| How | one search, paged to the end | 13 weekly windows; 0 split, so 0 probe calls and 0 probe events |
+| Fetched | **1,200**; page 6 returned HTTP 400 `DIS1035` | **1,282** fetched, **1,282** unique |
+| Lost | **82** (6.4%) | **0**: unique IDs = reported total, so the proof passes |
+| Calls | 7 | 14 (13 windows + 1 whole-range check) |
+
+An earlier brute-force run that day, at 10:59 PDT, gave the same result: 1,282 reported, 1,200 fetched, 82 lost, page 6 `DIS1035`, 7 calls.
+
+### Done check
+
+| Check | Result |
+|---|---|
+| `ruff check` | clean |
+| `mypy` (strict) | clean, 7 files |
+| `pytest` | **131 passed** |
+| PLAN's done check | Windows cover the whole range with no gaps (shared edges). Splitting stops at one local day. An over-cap day is reported (1,050 events: all fetched and flagged; 1,300: 1,200 fetched, stopped by `DIS1035`, and the proof fails with exit 1). |
+| Daylight saving | Nov 1, 2026 is 25 h with Oct 31 and Nov 2 at 24 h. Mar 14, 2027 is 23 h. The week holding each change is 169 h or 167 h with no gap. Both 01:30s on Nov 1 are fetched. |
+| Breakage test | Disabling splitting fails the dense-week test. Counting probe pages as final windows fails it too. |
+
+### Edge probe (18 calls)
+
+- **Both window edges are inclusive.** An event at exactly T is returned by [T−1d, T] and by [T, T+1d], and not by [T−1d, T−1s] or [T+1s, T+1d]. Same for 2 of 2 events.
+  - So windows share edges, and no extra second of overlap is needed.
+- **A `noSpecificTime` event sits inside its own Los Angeles day**, between 17:00 and 24:00 local. It is not in the UTC day of the same date.
+
+### Surprises
+
+1. **The reported total drifted again:** 1,276 (Phase 0, 15:22 UTC), then 1,280 (Phase 2, 17:17 UTC), then 1,282 (17:59 and 18:01 UTC).
+   - The proof therefore compares unique IDs with a total read seconds after the windows, not with an older number.
+2. **No window needed splitting in the real run.** The busiest week is about 165 events. Splitting is proven by tests against the fake API, not yet by real data.
+3. **Fetched equalled unique (1,282).** No real event fell exactly on a local-midnight edge this time. Edge duplicates are tested, but weren't seen live.
+
+---
+
 ## 2026-10-06: Phase 2, HTTP client
 
 ### Done check
@@ -35,7 +81,7 @@ Also covered: quota versus throttle 429s; named timeouts; unusable 200s retried 
    - `QuotaViolation` is documented by Ticketmaster.
    - `SpikeArrestViolation` is documented only by Apigee, the gateway Ticketmaster runs on.
    - The fallback (an unlabelled 429 with the budget estimate at 10 or less means quota) covers us if either code differs in practice.
-3. **`totalElements` drifted from 1,276 to 1,280 in about 4 hours.** The demo number is a snapshot, which is why each run records its own count.
+3. **`totalElements` drifted from 1,276 to 1,280 in about 2 hours** (15:22 to 17:17 UTC). The demo number is a snapshot, which is why each run records its own count.
 
 ---
 

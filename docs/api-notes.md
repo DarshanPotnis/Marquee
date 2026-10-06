@@ -55,6 +55,8 @@ Every difference we found between what the docs say and what the API did.
 | 8 | Error format | Shows only the 401 `{"fault":…}` shape | The 401 matches. 400s use a different `{"errors":[…]}` shape, which isn't shown, and its fields vary between codes (§10). |
 | 9 | Rate limits | "5000 API calls per day and rate limitation of 5 requests per second"; header names listed | `Rate-Limit: 5000` matches. Not stated in the docs: the reset is 24 h after the first call; **400s count** against the quota; 400 and 401 responses carry **no** rate-limit headers. |
 | 10 | `sales.public.startDateTime` | No placeholder mentioned | 235 of 1,295 events carry `1900-01-01T06:00:00Z` or `1900-01-01T18:00:00Z`, with `startTBD` and `startTBA` both false (§9). |
+| 11 | Window edges (`startDateTime` / `endDateTime`) | Not stated ("after this date" / "before this date" suggests exclusive) | **Both edges are inclusive.** An event starting at exactly T is returned by a window ending at T *and* by one starting at T; moving either edge by 1 s excludes it. Same result for 2 of 2 events (§7). |
+| 12 | Where a `noSpecificTime` event sits in time | Not stated | Inside its own Los Angeles local day, somewhere between 17:00 and 24:00 local; not in the UTC day of the same date (§7). |
 
 **Matches the docs, but surprising:** `classificationName` does match "any segment, genre, sub-genre, type, sub-type". That's why `classificationName=music` also returns Film and Arts & Theatre events (§4).
 
@@ -141,7 +143,7 @@ Page 6 returns exactly:
 - **The loss is loud, not silent.** But a client that stops at the documented limit (page 4) would silently get 1,000.
 - **Which events are lost depends on the sort.** `date,asc` loses the latest dates; `id,asc` loses events scattered across the range. In the first probe, the two sweeps' sets differed by 107 events each way.
 - **Windowed with the final query:** 13 weekly windows reported 156, 165, 142, 124, 130, 130, 121, 72, 92, 72, 55, 7 and 10 events, **summing to 1,276. All 1,276 were received**, one page per window, with no splits.
-- **Edges and bounds:** shared window edges caused no double counting. I didn't test whether the bounds are inclusive or exclusive.
+- **Edges and bounds:** both edges are inclusive (§7). Windows therefore share edges: nothing falls into a gap, and an event exactly on an edge is fetched by both windows and deduped by ID.
 - **Split threshold: stays at the documented 1,000**, even though 1,200 is reachable. It's a margin in case the off-by-one gets fixed.
 - **The total cap** (docs-vs-reality #7) never comes close at LA scale.
 
@@ -194,6 +196,32 @@ There's no date-plus-ID option.
 | `dates.start.dateTBD`, `dateTBA`, `timeTBA`, `noSpecificTime` | booleans, present on all 200 sample events |
 | `sales.public.startDateTime`, `endDateTime` | UTC |
 | `sales.public.startTBD`, `startTBA` | booleans |
+
+### Window edges and `noSpecificTime` events (Phase 3 probe, 2026-10-06, 18 calls)
+
+Each event was looked up by `id` with windows placed around its `dates.start.dateTime` T:
+
+| Window | Event at 2026-10-24T02:00:00Z | Event at 2026-11-13T02:30:00Z |
+|---|---|---|
+| [T − 1 day, T + 1 day] | 1 | 1 |
+| [T − 1 day, **T**]: ends exactly at T | **1** | **1** |
+| [**T**, T + 1 day]: starts exactly at T | **1** | **1** |
+| [T − 1 day, T − 1 s] | 0 | 0 |
+| [T + 1 s, T + 1 day] | 0 | 0 |
+
+**Both edges are inclusive.** Windows share edges, with no extra second of overlap needed. An event exactly on an edge is fetched twice and deduped by ID.
+
+A `noSpecificTime` event (local date 2026-10-16; no `localTime` or `dateTime`):
+
+| Window | Matched? |
+|---|---|
+| Its Los Angeles local day, [00:00 LA, next 00:00 LA] | **yes** |
+| The previous local day | no |
+| The next local day | no |
+| The UTC day of the same date, [00:00Z, next 00:00Z] | no |
+| A zero-length window at 00:00 LA | no |
+
+So the API places it after 00:00Z the next day (17:00 local) and before the next local midnight. Windows cut at Los Angeles midnights keep it on its own day.
 
 ## 8. TBA and TBD events: two undated calls per run
 

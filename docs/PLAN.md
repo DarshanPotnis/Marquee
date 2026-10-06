@@ -204,10 +204,21 @@ CREATE TABLE check_results (
 
 **The fix: adaptive window splitting.** Like splitting a stack of mail until each pile fits in one envelope:
 
+**Windows are Los Angeles calendar days, sent to the API as UTC.**
+- The range runs from now to the Los Angeles midnight 90 days out.
+- Every other boundary is a local midnight, so a day is 23, 24 or 25 hours long across daylight-saving changes.
+- The API includes both edges, so windows share edges: nothing falls in a gap, and an event exactly on an edge is fetched twice and deduped.
+- Events with no specific time sit inside their own local day (`docs/api-notes.md` §7).
+
 1. Start with weekly windows.
 2. For each window, fetch page 0 and read `page.totalElements`.
 3. If it's over 1,000, split the window in half and repeat. The 1,000 threshold is the documented limit, kept as a margin below the observed 1,200. The page-0 probe isn't wasted: its events are saved like any other page.
-4. Stop splitting at a minimum of 1 day. If a single day is still over the cap, record a failed check (`window_over_cap`) instead of silently losing data.
+4. Splits fall on a Los Angeles midnight. Stop at a minimum of 1 local day. If a single day is still over the cap, fetch what the API allows and record a failed check (`window_over_cap`) instead of silently losing data.
+
+**Counting.** A run's reported, fetched and unique numbers come from the **final** windows only.
+- Page 0 of a window that was split (a probe) is kept, because its events get saved. But they reappear in the child windows, so probe calls and probe events are counted separately.
+- That keeps "reported vs fetched" like with like, and duplicates never make it look as if we fetched more events than exist.
+- The proof of completeness is that unique event IDs across all windows equal the API's reported total for the whole range at that moment.
 
 **Boundaries:** windows share edges (one window's end is the next one's start). An event exactly on a boundary may come back twice, which is harmless because upserts dedupe. Gaps would lose data; overlaps can't.
 
@@ -283,11 +294,12 @@ marquee/
 ├── .env.example              # TM_API_KEY, MARQUEE_DATABASE_URL, MARQUEE_TEST_DATABASE_URL, settings
 ├── migrations/001_init.sql
 ├── src/marquee/
-│   ├── __main__.py           # CLI: migrate | ingest | rebuild | checks | prune
+│   ├── __main__.py           # CLI: migrate | brute-force | fetch-windows | ingest | rebuild | checks | prune
 │   ├── config.py             # settings from environment
 │   ├── db.py                 # connection, migrations, named advisory locks (migrate, ingest)
 │   ├── tm_client.py          # HTTP: pacing, retries, budget guard
-│   ├── windows.py            # window planning and splitting (pure)
+│   ├── windows.py            # Los Angeles-day windows and splitting, sent as UTC (pure)
+│   ├── fetch.py              # paging a window to the end; adaptive splitting (via tm_client)
 │   ├── transform.py          # raw JSON -> rows (pure)
 │   ├── changes.py            # stored row vs new row -> event_changes (pure)
 │   ├── load.py               # upserts, event_changes inserts
