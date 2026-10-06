@@ -4,6 +4,45 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: Phase 6, dashboard review
+
+### What changed
+
+- **Two sections under the headline:** Market (changes, onsales, upcoming events, events per week), then Pipeline health (checks, last 24 runs, database size).
+- **Events per week:** weeks are labelled categories in week order ("Oct 5", "Oct 12", …), not a time axis. A partial week is fainter, and its label says "(partial)". The caption names only the weeks that really are partial.
+- **Checks:** a plain-English name, with the code name in grey underneath. "Severity" is now "If it fails" (Run fails / Warning only). The duplicate warning line above the table is gone.
+- **Upcoming events:** CANCELLED, POSTPONED and RESCHEDULED appear in amber capitals. Dates show the weekday ("Tue Oct 6"). Any date outside this year carries its year. A missing onsale shows "—". Event dates in the other Market tables use the same format.
+- **Runs:** the "Unique (incl. undated)" and "Undated" columns sit side by side.
+- **Polish:** the Deploy button is hidden (`client.toolbarMode = "viewer"`), and tables under 0.1 MB show "<0.1 MB".
+
+### Surprises (production, read-only, 2026-10-06, a Tuesday)
+
+1. **The chart had a week outside the range, and today the partial week is the first one, not the last.** The 90 days run from Tue Oct 6 to Sun Jan 3. The old chart always drew 14 weeks, so its last bar, Jan 4, had **0** events and lay entirely outside the range. The true last week (Dec 28 to Jan 3, **11** events) is complete. The first week (Oct 5, **146** events) is missing its Monday. The chart now spans exactly the weeks the range touches (13 today) and marks whichever ends are partial. Because 90 days is 12 weeks and 6 days, the last week is complete only on Tuesdays and partial every other day.
+2. **13 real show, venue and city names contain Markdown characters,** for example `[THE X : NEXUS]`, `Nice as F**k`, `*This Whiskey and Me Tour*` and `Loose Bricks | …`. The coloured status words need `st.table`, whose cells are rendered as Markdown, so all text from the API is escaped there. Without escaping, `*…*` would render as italics and `$…$` as maths.
+3. **27 listed onsales are from earlier years** (2024: 1, 2025: 26), and **248** have none. Hence the year on dates outside 2026, and "—" for a missing onsale.
+
+### Trade-off
+
+`st.dataframe` can colour individual cells only through a pandas Styler, and that would make pandas a direct dependency. So the checks and upcoming tables use `st.table`. The cost: the upcoming table can no longer be sorted by clicking a column. The date, venue and status filters remain, and the table scrolls after 15 rows.
+
+### Tests
+
+- **361 pass**; ruff and mypy strict are clean.
+- **Breakage test:** each change below made its tests fail.
+  - Partial-week rule off by one day: 1 fails.
+  - "<0.1 MB" threshold changed: 1 fails.
+  - `$` not escaped: 1 fails.
+  - Year never shown: 2 fail.
+- **Chart test against the old chart:** it fails with `'temporal' == 'nominal'`.
+- **Rendered with production data in headless Chromium:**
+  - "Oct 5 (partial)" shows as a faint bar.
+  - The cancelled show reads CANCELLED in amber.
+  - Missing onsales show "—"; dates read "Fri Jan 1, 2027".
+  - Five tables show "<0.1 MB".
+  - Only the ⋮ menu remains in the toolbar.
+
+---
+
 ## 2026-10-06: Phase 6, dashboard
 
 ### Done check on production
