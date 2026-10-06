@@ -27,7 +27,8 @@ known-first-party = ["marquee"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src/marquee"]
+files = ["src/marquee", "dashboard"]
+mypy_path = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
