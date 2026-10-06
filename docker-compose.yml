@@ -1,9 +1,11 @@
-# Local Postgres for integration tests, same major version as Neon (18). Not used in production.
+# Local Postgres, same major version as Neon (18). Not used in production.
 #   docker compose up -d --wait
-#   set MARQUEE_TEST_DATABASE_URL in .env to postgresql://marquee:marquee@localhost:55432/marquee_test
-#   uv run pytest
-#   docker compose down -v
-# Put the URL in .env rather than exporting it: a value that differs between the shell and .env
+# Two databases (see .env.example):
+#   marquee       a local pipeline run (MARQUEE_DATABASE_URL)
+#   marquee_test  the integration tests (MARQUEE_TEST_DATABASE_URL)
+# The init script runs only on a fresh data directory. A container from before it was added has
+# only marquee_test: `docker compose down -v` then `up` recreates it (and empties it).
+# Put URLs in .env rather than exporting them: a value that differs between the shell and .env
 # is refused, so .env stays the single source locally.
 services:
   postgres:
@@ -14,6 +16,8 @@ services:
       POSTGRES_DB: marquee_test
     ports:
       - "55432:5432"  # not 5432, which a local Postgres often already uses
+    volumes:
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U marquee -d marquee_test"]
       interval: 2s
