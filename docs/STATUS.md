@@ -4,6 +4,25 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-06: The six review findings, fixed test-first
+
+All six were pushed at 23:31 UTC, before the 00:17 UTC (5:17 PM PDT) scheduled run. Each new test was seen failing before its fix: 17 new or changed tests failed first, and all pass now.
+
+| Finding | Fix | How the test failed before |
+|---|---|---|
+| A run with failed error checks counted as good | `runs.py` defines a **good run**: succeeded with `coalesce(checks_failed, 0) = 0`. It's used for freshness, listed events, the volume baseline and prune's kept run. The runs table shows **succeeded · CHECKS FAILED**. | 3 good + 4 bad prior runs gave a median of 300, so a drop to 300 passed |
+| A refused page lost its raw and stopped the run | Raw is committed on its own first, then the page loads in its own transaction. A refused page is recorded and skipped; the run carries on and closes `failed`, naming the raw id. | A NUL in an event ID stopped the run after 7 calls, with that page's raw rolled back |
+| `rebuild` didn't take the ingest lock | `rebuild` and `rebuild --verify` hold `marquee.ingest`. Ingest stands aside, saying an ingest or a rebuild is running. | Rebuild ran while another session held the lock, and an ingest ran mid-rebuild |
+| The kept run's raw had no age cap | Prune keeps the latest good run's raw for **at most 14 days**. | A 15-day-old kept run was still kept |
+| Abandoned runs stayed `running` | Each ingest, holding the lock, closes runs `running` for more than 10 minutes (the workflow timeout) as `failed`, with an "abandoned: …" reason. The dashboard shows **FAILED (abandoned)**. | A run 30 minutes old stayed `running` |
+| `--verify` couldn't pass after pruning | It compares only what retained raw can reproduce. The rest is counted as "not reproducible (pruned)", per table, plus `first_seen_run` separately. A real difference in a reproducible row still fails it. | It reported 2 only-live and 1 only-rebuilt rows after one run's raw was deleted |
+
+- **406 tests pass** (16 more); ruff and mypy strict are clean.
+- **Breakage test:** defining a good run as `status = 'succeeded'` alone made 3 tests fail.
+- **One genuine design limit moved to the README's Limits:** pruning runs inside `ingest`, so it stops when the schedule stops. A second limit was added there: a refused page's events aren't loaded that hour.
+
+---
+
 ## 2026-10-06: Phase 8, README, decision records, fresh clone, independent review
 
 ### Fresh-clone test: following only the README
