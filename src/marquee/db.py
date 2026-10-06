@@ -10,6 +10,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import psycopg
 from psycopg.rows import TupleRow
@@ -50,9 +51,31 @@ class MigrateResult:
     already_applied: int
 
 
+class DatabaseConnectError(RuntimeError):
+    """Connecting failed. The message has the database password removed."""
+
+
 def connect(url: str) -> Connection:
     # Autocommit: advisory locks belong to the session, and every write opens its own transaction.
-    return psycopg.connect(url, autocommit=True)
+    try:
+        return psycopg.connect(url, autocommit=True)
+    except psycopg.Error as exc:
+        # libpq quotes the connection string in some errors, password included. `from None` keeps
+        # the original exception (and the URL in it) out of the traceback.
+        raise DatabaseConnectError(
+            f"could not connect to the database ({type(exc).__name__}): "
+            f"{_without_password(str(exc), url)}"
+        ) from None
+
+
+def _without_password(text: str, url: str) -> str:
+    try:
+        password = urlsplit(url).password
+    except ValueError:  # unparseable URL: hide the whole thing rather than guess
+        return text.replace(url, "<DATABASE_URL>")
+    for secret in {password, unquote(password)} if password else set():
+        text = text.replace(secret, "***")
+    return text
 
 
 @contextmanager
