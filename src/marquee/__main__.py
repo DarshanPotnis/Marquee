@@ -122,7 +122,7 @@ def run_ingest(settings: Settings) -> int:
     bad = s.status != "succeeded" or s.checks_failed > 0
     level = logging.ERROR if bad else logging.INFO
     nulled = ", ".join(f"{k} {v}" for k, v in sorted(s.onsale_nulled.items())) or "none"
-    checks = (f"{len(s.checks)} run, {s.checks_failed} failed, {s.warnings} warnings"
+    checks = (f"{len(s.checks)} run, {s.checks_failed} failed, {_n(s.warnings, 'warning')}"
               if s.checks else f"skipped (run {s.status})")
     log.log(
         level,
@@ -153,8 +153,8 @@ def run_checks_report(settings: Settings, run_id: int | None) -> int:
         return 2
     failed = sum(1 for _, ok, sev, _ in rows if not ok and sev == "error")
     warnings = sum(1 for _, ok, sev, _ in rows if not ok and sev == "warning")
-    log.info("checks: run %d: %d checks, %d failed, %d warnings", run_id, len(rows), failed,
-             warnings)
+    log.info("checks: run %d: %d checks, %d failed, %s", run_id, len(rows), failed,
+             _n(warnings, "warning"))
     for name, ok, severity, detail in rows:
         log.log(logging.INFO if ok else (logging.ERROR if severity == "error" else logging.WARNING),
                 "checks: %s: %s (%s): %s", name, "passed" if ok else "FAILED", severity, detail)
@@ -272,6 +272,10 @@ def run_fetch_windows(
         result.calls + 1, result.calls, over_cap,
     )
     return 0 if proven else 1
+
+
+def _n(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def _positive(text: str) -> int:
