@@ -20,7 +20,7 @@ Real numbers from production on 2026-10-06, Ticketmaster's LA market (DMA 324), 
 | **Rebuild from raw** | 0 API calls; `rebuild --verify` found 0 differences. After pruning, it compares what retained raw can reproduce and reports the rest as not reproducible |
 | **Tests** | 406: unit tests, plus integration tests against Postgres 18, plus the Streamlit app run headless |
 | **Checks** | 7 after every run: 4 can fail the run, 3 are warnings |
-| **Scheduled runs on GitHub Actions** | run 6: _pending_ · run 7: _pending_ |
+| **Scheduled runs on GitHub Actions** | **Run 6** (02:22 UTC, Oct 7): 16 calls, 1,283 of 1,283, 0 failed checks, 22.7 s. **Run 7:** not yet; GitHub fired 1 of 10 hourly slots on the first night (see Limits) |
 
 ## Run it on a Mac
 
@@ -126,7 +126,7 @@ Ticketmaster's terms of use say you may not "cache or store any Event Content ot
 
 - **Face-value data only, and in practice no prices at all.** Resale marketplaces have no public API. Ticketmaster's `priceRanges` was missing on all 1,200 events checked, so Marquee stores no prices.
 - **One market.** Ticketmaster's LA market (DMA 324), Music, the next 90 days. That market reaches Palm Springs and San Luis Obispo, and tags 2 venues in Canada (the warning above).
-- **GitHub's scheduler is best-effort.** Scheduled runs can be delayed at busy times, which is why the cron is minute 17 rather than the top of the hour. On a public repository, schedules are disabled after 60 days without repository activity, and that's silent: only the dashboard's STALE shows it.
+- **GitHub's scheduler is best-effort.** Scheduled runs can be delayed at busy times, which is why the cron is minute 17 rather than the top of the hour. On the first night it fired **1 of 10** hourly slots, with no error and no email. The dashboard showed STALE, which is the backstop working. On a public repository, schedules are disabled after 60 days without repository activity, and that's silent: only the dashboard's STALE shows it.
 - **A read-only session, not a SELECT-only role.** The dashboard can't change data by accident, but a hostile query could switch the session back. If it's ever hosted, a SELECT-only database role is the stronger guard.
 - **The clean tables aren't pruned.** Raw ages out after 3 days, but past events stay in `events` with their first and last sighting.
 - **Rebuild only reaches back 3 days,** because that's all the raw that's kept ([decision 001](docs/decisions/001-raw-first.md) lists what it can't reproduce). `rebuild --verify` reports the rest as not reproducible.

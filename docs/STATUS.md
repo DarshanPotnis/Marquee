@@ -4,6 +4,45 @@ Newest first. Every number here comes from a real run, never an estimate. Full d
 
 ---
 
+## 2026-10-07: Phase 7, schedule: done check not met yet (1 of 2 scheduled runs)
+
+### Done check
+
+PLAN asks for two scheduled runs that succeed and appear on the dashboard. So far there is **one**.
+
+| Run | Trigger | Started (UTC) | Result |
+|---|---|---|---|
+| 5 | manual (`gh workflow run`) | Oct 6, 22:19:45 | **succeeded**. `migrate` applied `004`. 16 calls; 1,290 reported = 1,290 fetched; 0 failed checks; 20.0 s. The dashboard went back to **Fresh**. |
+| 6 | **schedule** (the 02:17 slot, fired at 02:21) | Oct 7, 02:22:06 | **succeeded**, on the fixed code (`28c07d6`). 16 calls; 1,283 = 1,283; unique 1,302 (19 undated); 0 failed checks, 1 warning; 1 change (a start time); 22.7 s. |
+| 7 | — | — | **not yet** |
+
+### Surprise: GitHub fired 1 of 10 hourly slots
+
+- **The workflow is `active`** and was created on Oct 6 at 22:19 UTC. From 23:17 to 08:17 UTC that's **10 slots**, and **1 run** happened: the 02:17 slot, 4 minutes late.
+- **Nothing failed, so nothing was emailed.**
+- **At 08:21 UTC the dashboard showed "STALE · last good run 6 hours ago"**, the backstop working as designed.
+- **Cause not confirmed.** GitHub documents scheduled runs as best-effort ("can be delayed during periods of high loads"). The status-page history wasn't readable from here.
+
+### Budget, from real numbers
+
+| | Number |
+|---|---|
+| Calls per run | **16** (runs 4–6): 13 windows + 1 whole-range total + 2 undated |
+| Calls per day, hourly as planned | **384**, against the 2,500 budget and the 5,000 quota |
+| Raw on disk per run | **1.79 MB**: `pg_total_relation_size('raw_responses')` = 11,239,424 bytes across 6 runs |
+| Raw kept at 3-day retention, hourly | 72 runs × 1.79 MB = **129 MB**, against the 500 MB budget |
+| Whole database now | 21.6 MB of Neon's 1,024 MB |
+| Neon compute, estimate | 20–23 s of work a run, plus Neon's 5-minute suspend tail, is about 5.4 min awake a run. Hourly, that's 64 h a month: **16–32 CU-hours** at 0.25–0.5 CU, of the free 100. Not yet checked against Neon's console. |
+
+### Done for Phase 7
+
+- **`ingest.yml`:** hourly at minute 17, plus manual dispatch. Steps: `uv sync --locked`, then `migrate`, then `ingest`. Runs queue and never overlap; `timeout-minutes: 10`; `permissions: contents: read`; actions pinned to commits.
+- **Secrets** were set with `gh secret set`, piped from `.env` on stdin; no value appeared in a command or in output. The public logs contain **0** matches for the key.
+- **The failure email:** github.com/settings/notifications → System → Actions → **Email**, then **Only notify for failed workflows**, then Save. Scheduled-run notifications go to whoever last changed the cron line.
+- **The limits are documented** in PLAN §5 and the README: delays at busy times, the 60-day disable on public repositories, and that both are silent.
+
+---
+
 ## 2026-10-06: The six review findings, fixed test-first
 
 All six were pushed at 23:31 UTC, before the 00:17 UTC (5:17 PM PDT) scheduled run. Each new test was seen failing before its fix: 17 new or changed tests failed first, and all pass now.
